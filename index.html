@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>お絵かき（Undo対応）</title>
+  <title>お絵かき（Pointer + Undo）</title>
   <style>
     body { margin:0; background:#eee; }
     header { background:#333; color:#fff; padding:10px; }
@@ -27,81 +27,67 @@
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
 
-    // ---- Undo/Redo 用（今回は Undo のみ使用）----
+    // ---- Undo 用 ----
     const undoStack = [];
-    const redoStack = [];
-    const UNDO_LIMIT = 50; // 履歴の上限（メモリ対策）
+    const UNDO_LIMIT = 50;
 
     let drawing = false, erasing = false, last = null;
 
     function resize() {
-      // ※リサイズすると画像サイズが変わるため履歴をクリアします
       canvas.width  = window.innerWidth;
       canvas.height = window.innerHeight * 0.9;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.lineWidth = 4;
-
-      // 背景を白で初期化（保存画像が透明にならないように）
+      // 背景を白で塗る（保存時に透明にならないように）
       ctx.save();
       ctx.fillStyle = "#fff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.restore();
-
-      // 初期状態は履歴なし（最初の描画時にスナップショットを取ります）
-      undoStack.length = 0;
-      redoStack.length = 0;
+      undoStack.length = 0; // サイズが変わるため履歴はクリア
     }
     window.addEventListener('resize', resize);
     resize();
 
-    function getMousePos(e) {
+    function getPos(e) {
       const rect = canvas.getBoundingClientRect();
       return { x: e.clientX - rect.left, y: e.clientY - rect.top };
     }
 
-    // ---- 履歴操作 ----
+    // ---- 履歴 ----
     function pushSnapshot() {
-      // 現在キャンバスをスナップショットして積む
       try {
         const snap = ctx.getImageData(0, 0, canvas.width, canvas.height);
         if (undoStack.length >= UNDO_LIMIT) undoStack.shift();
         undoStack.push(snap);
-        // Undoのたびにやり直し履歴は破棄（今回はRedoボタンなし）
-        redoStack.length = 0;
       } catch (err) {
         console.warn('スナップショット取得に失敗:', err);
       }
     }
-
     function undo() {
       if (undoStack.length === 0) return;
       try {
-        // 現在状態を redoStack に退避（将来Redo対応する場合に備え）
-        const current = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        redoStack.push(current);
-
         const prev = undoStack.pop();
         ctx.putImageData(prev, 0, 0);
       } catch (err) {
-        console.warn('Undoに失敗:', err);
+        console.warn('Undo失敗:', err);
       }
     }
 
-    // ---- マウス操作（シンプル実装）----
-    canvas.addEventListener('mousedown', e => {
+    // ---- Pointer 対応（マウス/タッチ/Apple Pencil 共通）----
+    canvas.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
       drawing = true;
-      last = getMousePos(e);
-      // ストローク開始時にスナップショットを保存
-      pushSnapshot();
+      last = getPos(e);
+      pushSnapshot(); // ストローク開始前に履歴を積む
     });
-    canvas.addEventListener('mouseup', () => { drawing = false; });
-    canvas.addEventListener('mouseleave', () => { drawing = false; });
 
-    canvas.addEventListener('mousemove', e => {
+    canvas.addEventListener('pointermove', (e) => {
       if (!drawing) return;
-      const p = getMousePos(e);
+      const p = getPos(e);
       ctx.strokeStyle = erasing ? "#fff" : "#000";
+      // （必要なら筆圧対応） const w = erasing ? 18 : (4 + (e.pressure || 0)*2); ctx.lineWidth = w;
       ctx.beginPath();
       ctx.moveTo(last.x, last.y);
       ctx.lineTo(p.x, p.y);
@@ -109,5 +95,34 @@
       last = p;
     });
 
+    function stopDraw() { drawing = false; last = null; }
+    canvas.addEventListener('pointerup', stopDraw);
+    canvas.addEventListener('pointercancel', stopDraw);
+    canvas.addEventListener('pointerleave', stopDraw);
+
     // ---- ボタン ----
-    document.g
+    document.getElementById('penBtn').onclick    = () => erasing = false;
+    document.getElementById('eraserBtn').onclick  = () => erasing = true;
+    document.getElementById('undoBtn').onclick    = () => undo();
+
+    document.getElementById('clearBtn').onclick = () => {
+      pushSnapshot();
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.save(); ctx.fillStyle = "#fff"; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore();
+    };
+
+    document.getElementById('saveBtn').onclick = () => {
+      const a = document.createElement('a');
+      a.download = 'drawing.png';
+      a.href = canvas.toDataURL('image/png');
+      a.click();
+    };
+
+    // ---- ショートカット（Ctrl/Cmd + Z）----
+    window.addEventListener('keydown', (e) => {
+      const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z';
+      if (isUndo) { e.preventDefault(); undo(); }
+    });
+  </script>
+</body>
+</html>
