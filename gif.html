@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>画像→GIFメーカー</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP"; margin: 0; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .panel { display: grid; gap: 12px; max-width: 800px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  input[type="number"] { width: 7em; }
+  select { padding: 4px 6px; }
+  button { padding: 8px 12px; cursor: pointer; border-radius: 8px; border: 1px solid #9995; }
+  button.primary { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+  #list { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 10px; }
+  .card { border: 1px solid #9995; border-radius: 8px; padding: 8px; display: grid; gap: 6px; }
+  .thumb { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 6px; background: #fff; }
+  .ops { display: flex; gap: 6px; justify-content: center; }
+  #status { min-height: 1.4em; opacity: .9; }
+  .hint { font-size: 12px; opacity: .7; }
+</style>
+<!-- GIFエンコーダ（ブラウザ用／CDN） -->
+<script src="https://unpkg.com/gif.js.optimized/dist/gif.js"></script>
+</head>
+<body>
+  <h1>画像→GIFメーカー</h1>
+  <div class="panel">
+    <div class="row">
+      <input id="files" type="file" accept="image/*" multiple>
+      <span class="hint">最大10枚まで推奨。JPG/PNG混在可。</span>
+    </div>
+    <div class="row">
+      <label>フレーム遅延（ms）：<input id="delay" type="number" min="10" step="10" value="100"></label>
+      <label>縮小率：
+        <select id="scale">
+          <option value="1">100%</option>
+          <option value="0.75">75%</option>
+          <option value="0.5">50%</option>
+          <option value="0.33">33%</option>
+          <option value="0.25">25%</option>
+        </select>
+      </label>
+      <button id="make" class="primary" disabled>GIFを作成</button>
+      <a id="dl" style="display:none" download="animation.gif"></a>
+    </div>
+    <div id="status"></div>
+    <div id="list"></div>
+    <div class="hint">※GIFは最大256色です。大きな画像・枚数が多い場合は処理が重くなります。縮小率の調整をご利用ください。</div>
+  </div>
+
+<script>
+const input = document.getElementById('files');
+const list  = document.getElementById('list');
+const delay = document.getElementById('delay');
+const scaleSel = document.getElementById('scale');
+const makeBtn = document.getElementById('make');
+const statusEl = document.getElementById('status');
+const dlLink = document.getElementById('dl');
+
+// 読み込んだ画像の配列（{file, url, img}）
+let items = [];
+
+input.addEventListener('change', async (e) => {
+  items = [];
+  status('読み込み中…');
+  const files = Array.from(e.target.files).slice(0, 50); // 上限ゆるめ（UIは10推奨）
+  for (const f of files) {
+    if (!f.type.startsWith('image/')) continue;
+    const url = URL.createObjectURL(f);
+    const img = await loadImage(url);
+    items.push({ file: f, url, img });
+  }
+  renderList();
+  status(items.length ? `読み込み完了：${items.length}枚` : '画像を選択してください');
+  makeBtn.disabled = items.length === 0;
+});
+
+function loadImage(url){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+function renderList(){
+  list.innerHTML = '';
+  items.forEach((it, idx) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const imgel = document.createElement('img');
+    imgel.className = 'thumb';
+    imgel.src = it.url;
+    const ops = document.createElement('div');
+    ops.className = 'ops';
+    const up = btn('↑', () => move(idx, -1));
+    const down = btn('↓', () => move(idx, 1));
+    const del = btn('削除', () => remove(idx));
+    card.append(imgel, ops);
+    ops.append(up, down, del);
+    list.append(card);
+  });
+}
+
+function btn(text, onClick){
+  const b = document.createElement('button');
+  b.textContent = text;
+  b.onclick = onClick;
+  return b;
+}
+function move(i, d){
+  const j = i + d;
+  if (j < 0 || j >= items.length) return;
+  [items[i], items[j]] = [items[j], items[i]];
+  renderList();
+}
+function remove(i){
+  URL.revokeObjectURL(items[i].url);
+  items.splice(i,1);
+  renderList();
+  makeBtn.disabled = items.length === 0;
+}
+
+makeBtn.addEventListener('click', async () => {
+  if (!items.length) return;
+  const s = parseFloat(scaleSel.value) || 1;
+  // ベースサイズは1枚目に合わせる
+  const baseW = Math.max(1, Math.round(items[0].img.naturalWidth  * s));
+  const baseH = Math.max(1, Math.round(items[0].img.naturalHeight * s));
+
+  status(`エンコード準備中…（${baseW}×${baseH}）`);
+
+  // オフスクリーンCanvas
+  const cvs = document.createElement('canvas');
+  const ctx = cvs.getContext('2d');
+  cvs.width = baseW; cvs.height = baseH;
+
+  // GIFエンコーダ
+  const gif = new GIF({
+    workers: 2,
+    quality: 10, // 1(最高)〜20(速い)の目安
+    workerScript: 'https://unpkg.com/gif.js.optimized/dist/gif.worker.js',
+    width: baseW,
+    height: baseH
+  });
+
+  const d = Math.max(10, parseInt(delay.value, 10) || 100); // ms
+
+  // フレーム追加
+  for (let i = 0; i < items.length; i++) {
+    // 背景白（透過を避けたい場合）
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,baseW,baseH);
+
+    // 画像を等倍で収まるようにフィット（上下左右黒帯なし）
+    const {img} = items[i];
+    const scale = Math.min(baseW / img.naturalWidth, baseH / img.naturalHeight);
+    const w = Math.round(img.naturalWidth * scale);
+    const h = Math.round(img.naturalHeight * scale);
+    const x = Math.floor((baseW - w) / 2);
+    const y = Math.floor((baseH - h) / 2);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, x, y, w, h);
+
+    gif.addFrame(ctx, {copy: true, delay: d});
+    status(`フレーム追加中… ${i+1}/${items.length}`);
+    await tick(); // UI更新のため小休止
+  }
+
+  status('エンコード中…（ブラウザで実行）');
+  gif.on('finished', (blob) => {
+    const url = URL.createObjectURL(blob);
+    dlLink.href = url;
+    dlLink.style.display = '';
+    dlLink.download = 'animation.gif';
+    dlLink.click(); // 自動ダウンロード
+    // 少し残してから解放
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    status('完了しました。ダウンロードをご確認ください。');
+  });
+  gif.render();
+});
+
+function status(t){ statusEl.textContent = t; }
+function tick(){ return new Promise(r => setTimeout(r, 0)); }
+</script>
+</body>
+</html>
