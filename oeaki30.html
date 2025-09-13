@@ -15,6 +15,7 @@
   button.primary, .seg button.primary, a.btn.primary { background:#3b82f6; color:#fff; border-color:#3b82f6; }
   button:disabled { opacity:.6; cursor:not-allowed; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .row.right { margin-left:auto; } /* 右寄せ用 */
   .seg { display:inline-flex; gap:6px; }
   .label { color:#e5e7eb; font-size:13px; }
   main { display:grid; grid-template-columns: 1fr; gap:10px; padding:10px; }
@@ -42,17 +43,16 @@
 <header>
   <div class="title">おえかき 30ページ</div>
 
-  <!-- 基本ツール -->
+  <!-- 基本ツール（左側） -->
   <div class="row">
     <button id="penBtn" class="primary">ペン</button>
     <button id="eraserBtn">消しゴム</button>
     <button id="undoBtn">戻る</button>
     <button id="clearPageBtn">全消去</button>
-    <button id="saveBtn">このページをPNG保存</button>
     <button id="copyPrevBtn" title="前ページの内容をこのページへコピー">前ページをコピー</button>
   </div>
 
-  <!-- レイヤー操作 -->
+  <!-- レイヤー操作（左側） -->
   <div class="row">
     <span class="label">レイヤー</span>
     <div class="seg" id="layerSeg">
@@ -65,17 +65,23 @@
     <span id="opacityVal" class="label">100%</span>
   </div>
 
-  <!-- 出力・表示 -->
+  <!-- 遅延（左側） -->
   <div class="row">
-    <span class="label">遅延(ms)</span><input id="delayMs" type="number" min="10" step="10" value="100" style="width:6em;">
-    <button id="playBtn">▶︎ プレビュー</button>
+    <span class="label">遅延(ms)</span>
+    <input id="delayMs" type="number" min="10" step="10" value="100" style="width:6em;">
+  </div>
+
+  <!-- 右側に寄せる操作群 -->
+  <div class="row right">
     <button id="pngAllBtn" class="primary">PNG一括（全ページ）</button>
+    <button id="playBtn">▶︎ プレビュー</button>
     <button id="toggleThumbsBtn">サムネ非表示</button>
     <a class="btn" href="images2mp4.html" target="_blank" rel="noopener noreferrer">画像→MP4ページへ</a>
   </div>
 
   <div class="spacer"></div>
 
+  <!-- ページ移動（右端） -->
   <div class="row" style="margin-left:auto">
     <button id="prevBtn">← 前</button>
     <div id="pageLabel">ページ 1 / 30</div>
@@ -104,14 +110,14 @@ const PAGE_COUNT = 30;
 const LAYER_COUNT = 3;
 const TH_W = 96, TH_H = 72;
 
-// 太さプリセット（既存と同じ）
+// 太さプリセット（必要に応じて調整可能）
 const PEN_SIZES    = { small: 2,  medium: 4,  large: 8  };
 const ERASER_SIZES = { small: 12, medium: 18, large: 26 };
 let penSizeKey = 'medium';
 let eraserSizeKey = 'medium';
 
 const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d'); // ここには常に「合成結果」を描く
+const ctx = canvas.getContext('2d'); // 合成結果を描く
 const pagesBar   = document.getElementById('pages');
 const pageLabel  = document.getElementById('pageLabel');
 const statusEl   = document.getElementById('status');
@@ -125,10 +131,10 @@ const opacityVal   = document.getElementById('opacityVal');
 let drawing=false, erasing=false, last=null;
 let currentPage = 0;
 let activeLayer = 0;
-const undoStack = []; // アクティブレイヤーのスナップショットを積む
+const undoStack = []; // アクティブレイヤーのスナップショット
 const UNDO_LIMIT = 50;
 
-// ページごとの構造：{ layers:[{cvs,ctx}|null x L], opacity:[number x L], dirty:bool, thumbEl:canvas }
+// ページ：layers(各レイヤーCanvas) + opacity(各レイヤーα) + thumb
 const pages = Array.from({length: PAGE_COUNT}, () => ({
   layers: Array.from({length: LAYER_COUNT}, ()=> null),
   opacity: Array.from({length: LAYER_COUNT}, ()=> 1),
@@ -136,7 +142,7 @@ const pages = Array.from({length: PAGE_COUNT}, () => ({
   thumbEl: null
 }));
 
-// プレビュー管理
+// プレビュー
 let isPreview = false;
 let previewTimer = null;
 let previewFrames = [];
@@ -146,7 +152,7 @@ let previewBackup = { pageIndex: 0, image: null };
 /* ========= 初期化 ========= */
 initCanvas();
 buildPageThumbnails();
-renderCurrentPage(); // page0
+renderCurrentPage();
 bindUI();
 updatePageUI();
 updateThumb(0);
@@ -161,13 +167,12 @@ function ensureLayer(pageIndex, layerIndex){
     const cvs = document.createElement('canvas');
     cvs.width = CANVAS_W; cvs.height = CANVAS_H;
     const c = cvs.getContext('2d');
-    // 透明背景（下地は白合成で担保）
-    p.layers[layerIndex] = { cvs, ctx: c };
+    p.layers[layerIndex] = { cvs, ctx: c }; // 透明背景
   }
   return p.layers[layerIndex];
 }
 
-/* ========= サムネUI ========= */
+/* ========= サムネ ========= */
 function buildPageThumbnails(){
   for(let i=0;i<PAGE_COUNT;i++){
     const btn = document.createElement('button');
@@ -186,16 +191,16 @@ function buildPageThumbnails(){
   }
 }
 
-/* ========= イベント束ね ========= */
+/* ========= イベント ========= */
 function bindUI(){
   document.getElementById('penBtn').onclick    = ()=>{ erasing=false; setToolActive('penBtn'); };
   document.getElementById('eraserBtn').onclick = ()=>{ erasing=true;  setToolActive('eraserBtn'); };
   document.getElementById('undoBtn').onclick   = ()=>{ if(!isPreview){ undo(); updateThumb(currentPage); } };
   document.getElementById('clearPageBtn').onclick = ()=>{ if(!isPreview){ pushSnapshot(); clearPage(currentPage); } };
-  document.getElementById('saveBtn').onclick   = ()=>{ if(!isPreview) saveCurrentPNG(); };
   document.getElementById('copyPrevBtn').onclick = copyFromPreviousPage;
   document.getElementById('prevBtn').onclick   = ()=>{ if(!isPreview) switchPage(Math.max(0, currentPage-1)); };
   document.getElementById('nextBtn').onclick   = ()=>{ if(!isPreview) switchPage(Math.min(PAGE_COUNT-1, currentPage+1)); };
+
   document.getElementById('pngAllBtn').onclick = ()=> exportAllPNGs();
 
   document.getElementById('toggleThumbsBtn').onclick = ()=>{
@@ -209,7 +214,6 @@ function bindUI(){
       document.querySelectorAll('#layerSeg button').forEach(b=> b.classList.remove('primary'));
       btn.classList.add('primary');
       activeLayer = parseInt(btn.dataset.layer, 10);
-      // 現ページのこのレイヤー不透明度をUIへ反映
       const op = pages[currentPage].opacity[activeLayer] ?? 1;
       opacityRange.value = Math.round(op*100);
       opacityVal.textContent = `${Math.round(op*100)}%`;
@@ -225,18 +229,18 @@ function bindUI(){
     updateThumb(currentPage);
   });
 
-  // プレビュー
+  // プレビュー（停止ボタンは常に有効にしておく）
   const playBtn = document.getElementById('playBtn');
   playBtn.onclick = ()=> isPreview ? stopPreview() : startPreview();
 
-  // 描画（アクティブレイヤーのキャンバスにストローク→合成を再描画）
+  // 描画（アクティブレイヤーに描き、合成を再描画）
   canvas.addEventListener('pointerdown', (e)=>{
     if(isPreview) return;
     e.preventDefault();
     canvas.setPointerCapture(e.pointerId);
     drawing = true;
     last = getPos(e);
-    pushSnapshot(); // アクティブレイヤーのスナップショット
+    pushSnapshot();
   });
   canvas.addEventListener('pointermove', (e)=>{
     if(!drawing || isPreview) return;
@@ -245,8 +249,8 @@ function bindUI(){
     const lctx = layer.ctx;
     lctx.lineWidth = erasing ? ERASER_SIZES[eraserSizeKey] : PEN_SIZES[penSizeKey];
     lctx.lineCap = 'round'; lctx.lineJoin = 'round';
-    lctx.strokeStyle = erasing ? '#000' : '#000';
-    lctx.globalCompositeOperation = erasing ? 'destination-out' : 'source-over'; // 透明消し
+    lctx.strokeStyle = '#000';
+    lctx.globalCompositeOperation = erasing ? 'destination-out' : 'source-over';
     lctx.beginPath(); lctx.moveTo(last.x,last.y); lctx.lineTo(p.x,p.y); lctx.stroke();
     lctx.globalCompositeOperation = 'source-over';
     last = p;
@@ -259,13 +263,16 @@ function bindUI(){
     updateThumb(currentPage);
   }));
 
-  // Ctrl/Cmd+Z
+  // ショートカット：Undo
   window.addEventListener('keydown', (e)=>{
     const isUndoKey = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase()==='z';
     if(isUndoKey && !isPreview){ e.preventDefault(); undo(); updateThumb(currentPage); }
   });
+  // 追加：Escでプレビュー停止
+  window.addEventListener('keydown', (e)=>{
+    if (e.key === 'Escape' && isPreview) { e.preventDefault(); stopPreview(); }
+  });
 
-  // 前ページが無いときはコピー無効
   updateCopyPrevButton();
 }
 
@@ -278,16 +285,12 @@ function getPos(e){ const r = canvas.getBoundingClientRect(); return { x: e.clie
 /* ========= ページ切替/表示 ========= */
 function switchPage(i){
   if(i===currentPage) return;
-  // 現在の合成は都度行っているので保存は不要だが、サムネを最新化
   updateThumb(currentPage);
-
   currentPage = i;
   updatePageUI();
-  // レイヤー不透明度UIを反映
   const op = pages[currentPage].opacity[activeLayer] ?? 1;
   opacityRange.value = Math.round(op*100);
   opacityVal.textContent = `${Math.round(op*100)}%`;
-
   renderCurrentPage();
   updateCopyPrevButton();
 }
@@ -295,11 +298,10 @@ function switchPage(i){
 function updatePageUI(){
   pageLabel.textContent = `ページ ${currentPage+1} / ${PAGE_COUNT}`;
   Array.from(pagesBar.children).forEach((btn,idx)=> btn.classList.toggle('active', idx===currentPage));
-  undoStack.length = 0; // ページを跨いだUndoは破棄
+  undoStack.length = 0;
 }
 
 function renderCurrentPage(){
-  // 背景白→各レイヤーを不透明度で合成
   ctx.save();
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
@@ -317,7 +319,7 @@ function renderCurrentPage(){
   ctx.restore();
 }
 
-/* ========= サムネ生成 ========= */
+/* ========= サムネ ========= */
 function updateThumb(index){
   const th = pages[index]?.thumbEl; if(!th) return;
   const tctx = th.getContext('2d');
@@ -325,7 +327,6 @@ function updateThumb(index){
 
   const tmp = document.createElement('canvas'); tmp.width = CANVAS_W; tmp.height = CANVAS_H;
   const c = tmp.getContext('2d');
-  // 合成
   c.fillStyle = '#fff'; c.fillRect(0,0,CANVAS_W,CANVAS_H);
   const p = pages[index];
   for(let li=0; li<LAYER_COUNT; li++){
@@ -336,7 +337,6 @@ function updateThumb(index){
       c.drawImage(layer.cvs, 0, 0);
     }
   }
-  // 縮小描画
   tctx.imageSmoothingEnabled = true; tctx.imageSmoothingQuality = 'high';
   tctx.drawImage(tmp, 0, 0, TH_W, TH_H);
 }
@@ -350,18 +350,11 @@ function copyFromPreviousPage(){
   if(currentPage === 0) return;
   const src = pages[currentPage - 1];
   const dst = pages[currentPage];
-
-  // レイヤー＆不透明度を複製
   for(let li=0; li<LAYER_COUNT; li++){
-    // 先にターゲットレイヤーを確保・クリア
     const dLayer = ensureLayer(currentPage, li);
     dLayer.ctx.clearRect(0,0,CANVAS_W,CANVAS_H);
-
     const sLayer = src.layers[li];
-    if(sLayer){
-      dLayer.ctx.drawImage(sLayer.cvs, 0, 0);
-    }
-    // 不透明度もコピー
+    if(sLayer){ dLayer.ctx.drawImage(sLayer.cvs, 0, 0); }
     dst.opacity[li] = src.opacity[li] ?? 1;
   }
   dst.dirty = true;
@@ -393,59 +386,34 @@ function pushSnapshot(){
 function undo(){
   if(!undoStack.length) return;
   const last = undoStack.pop();
-  // ページ/レイヤーが変わっていても適用
   const layer = ensureLayer(last.page, last.layer);
   try{ layer.ctx.putImageData(last.data, 0, 0); }catch(e){}
   if(last.page === currentPage) { renderCurrentPage(); updateThumb(currentPage); }
   else { updateThumb(last.page); }
 }
 
-/* ========= PNG保存（現在ページ合成） ========= */
-function saveCurrentPNG(){
-  // 現在の表示キャンバス（合成済み）を保存
-  const a = document.createElement('a');
-  a.download = `page-${String(currentPage+1).padStart(2,'0')}.png`;
-  a.href = canvas.toDataURL('image/png');
-  a.click();
-}
-
-/* ========= プレビュー（レイヤー合成で再生） ========= */
+/* ========= プレビュー ========= */
 function startPreview(){
-  // 描画のあるページだけ対象
   previewFrames = [];
   for(let i=0;i<PAGE_COUNT;i++){
-    if(pages[i].dirty || hasAnyPixels(i)) previewFrames.push(i);
-  }
-  if(previewFrames.length===0){ status('描画のあるページがありません（プレビューできません）'); return; }
-
-  // バックアップ（合成後の見た目）
-  try{ previewBackup.image = ctx.getImageData(0,0,canvas.width,canvas.height); }catch{}
-  previewBackup.pageIndex = currentPage;
-
-  setEditingEnabled(false); isPreview = true; previewIndex = 0;
-  document.getElementById('playBtn').textContent = '■ 停止'; status('プレビュー再生中…');
-
-  renderPreviewFrame();
-  previewTimer = setInterval(renderPreviewFrame, getDelay());
-}
-function hasAnyPixels(i){
-  const p = pages[i];
-  for(let li=0; li<LAYER_COUNT; li++){
-    const layer = p.layers[li];
-    const alpha = p.opacity[li] ?? 1;
-    if(layer && alpha>0){
-      // 粗判定：合成前でも「何か描いた」フラグがあればdirtyで拾えるので省略可能
-      return true;
+    const p = pages[i];
+    // どれかのレイヤーに内容があれば対象
+    for(let li=0; li<LAYER_COUNT; li++){
+      if(p.layers[li]){ previewFrames.push(i); break; }
     }
   }
-  return false;
+  if(previewFrames.length===0){ status('描画のあるページがありません（プレビューできません）'); return; }
+  try{ previewBackup.image = ctx.getImageData(0,0,canvas.width,canvas.height); }catch{}
+  previewBackup.pageIndex = currentPage;
+  setEditingEnabled(false); isPreview = true; previewIndex = 0;
+  document.getElementById('playBtn').textContent = '■ 停止'; status('プレビュー再生中…');
+  renderPreviewFrame(); previewTimer = setInterval(renderPreviewFrame, getDelay());
 }
 function renderPreviewFrame(){
   const idx = previewFrames[previewIndex];
   Array.from(pagesBar.children).forEach((b, i)=> b.classList.toggle('active', i===idx));
   pageLabel.textContent = `ページ ${idx+1} / ${PAGE_COUNT}`;
-
-  // 合成して表示
+  // 合成表示
   const p = pages[idx];
   ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
   for(let li=0; li<LAYER_COUNT; li++){
@@ -457,7 +425,6 @@ function renderPreviewFrame(){
     }
   }
   ctx.globalAlpha = 1;
-
   previewIndex = (previewIndex + 1) % previewFrames.length;
 }
 function stopPreview(){
@@ -482,7 +449,6 @@ async function exportAllPNGs(){
 
   const zip = new JSZip();
   for(let i=0;i<PAGE_COUNT;i++){
-    // 合成して out へ
     octx.clearRect(0,0,CANVAS_W,CANVAS_H);
     octx.fillStyle = '#ffffff'; octx.fillRect(0,0,CANVAS_W,CANVAS_H);
     const p = pages[i];
@@ -533,18 +499,21 @@ function canvasToBlob(c, type='image/png'){
 /* ========= UI補助 ========= */
 function setEditingEnabled(enabled){
   [
-    'penBtn','eraserBtn','undoBtn','clearPageBtn','saveBtn',
-    'copyPrevBtn','prevBtn','nextBtn','pngAllBtn','toggleThumbsBtn'
-  ].forEach(id => document.getElementById(id).disabled = !enabled);
-
-  // ★ プレビューの開始/停止ボタンは常に押せるようにする
-  document.getElementById('playBtn').disabled = false;
+    'penBtn','eraserBtn','undoBtn','clearPageBtn',
+    'copyPrevBtn','prevBtn','nextBtn',
+    'pngAllBtn','toggleThumbsBtn'
+  ].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.disabled = !enabled;
+  });
+  // プレビュー開始/停止ボタンは常に有効
+  const play = document.getElementById('playBtn');
+  if (play) play.disabled = false;
 
   delayInput.disabled = !enabled;
   opacityRange.disabled = !enabled;
   document.querySelectorAll('#layerSeg button').forEach(b=> b.disabled = !enabled);
 }
-
 
 function resetProgress(){ fill.style.width='0%'; pct.textContent='0%'; }
 function progress(p){ const v=Math.max(0,Math.min(1,p)); fill.style.width=(v*100).toFixed(0)+'%'; pct.textContent=(v*100).toFixed(0)+'%'; }
