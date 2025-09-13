@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>おえかき30ページ（レイヤー・不透明度・前ページコピー）</title>
+<title>おえかき30ページ（レイヤー・不透明度・前ページコピー・ページ別Undo）</title>
 <style>
   :root { color-scheme: light dark; }
   body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP"; background:#f6f7f9; }
@@ -15,13 +15,13 @@
   button.primary, .seg button.primary, a.btn.primary { background:#3b82f6; color:#fff; border-color:#3b82f6; }
   button:disabled { opacity:.6; cursor:not-allowed; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .row.right { margin-left:auto; } /* 右寄せ用 */
+  .row.right { margin-left:auto; } /* 右寄せ */
   .seg { display:inline-flex; gap:6px; }
   .label { color:#e5e7eb; font-size:13px; }
   main { display:grid; grid-template-columns: 1fr; gap:10px; padding:10px; }
   .canvas-wrap { display:flex; justify-content:center; }
   canvas#canvas { background:#fff; border:1px solid #e5e7eb; border-radius:8px; touch-action:none; }
-  /* サムネ（横スクロール） */
+  /* サムネ */
   .pages { display:flex; gap:8px; padding:8px 10px 10px; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; background:#f1f5f9; border-bottom:1px solid #e5e7eb; }
   .hidden { display:none !important; }
   .pagebtn { background:transparent; border:none; padding:0; display:inline-grid; gap:4px; justify-items:center; }
@@ -36,14 +36,14 @@
   .spacer { flex:1; }
   input[type="range"] { width:160px; }
 </style>
-<!-- ZIP作成用ライブラリ（PNG一括で使用） -->
+<!-- ZIP作成用ライブラリ -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 <body>
 <header>
   <div class="title">おえかき 30ページ</div>
 
-  <!-- 基本ツール（左側） -->
+  <!-- 基本ツール（左） -->
   <div class="row">
     <button id="penBtn" class="primary">ペン</button>
     <button id="eraserBtn">消しゴム</button>
@@ -52,7 +52,7 @@
     <button id="copyPrevBtn" title="前ページの内容をこのページへコピー">前ページをコピー</button>
   </div>
 
-  <!-- レイヤー操作（左側） -->
+  <!-- レイヤー操作（左） -->
   <div class="row">
     <span class="label">レイヤー</span>
     <div class="seg" id="layerSeg">
@@ -65,13 +65,13 @@
     <span id="opacityVal" class="label">100%</span>
   </div>
 
-  <!-- 遅延（左側） -->
+  <!-- 遅延（左） -->
   <div class="row">
     <span class="label">遅延(ms)</span>
     <input id="delayMs" type="number" min="10" step="10" value="100" style="width:6em;">
   </div>
 
-  <!-- 右側に寄せる操作群 -->
+  <!-- 右寄せの操作群 -->
   <div class="row right">
     <button id="pngAllBtn" class="primary">PNG一括（全ページ）</button>
     <button id="playBtn">▶︎ プレビュー</button>
@@ -108,16 +108,17 @@
 const CANVAS_W = 640, CANVAS_H = 480;
 const PAGE_COUNT = 30;
 const LAYER_COUNT = 3;
+const UNDO_LIMIT = 20; // ページ×レイヤーごとの履歴上限
 const TH_W = 96, TH_H = 72;
 
-// 太さプリセット（必要に応じて調整可能）
+// 太さプリセット（必要に応じ調整可）
 const PEN_SIZES    = { small: 2,  medium: 4,  large: 8  };
 const ERASER_SIZES = { small: 12, medium: 18, large: 26 };
 let penSizeKey = 'medium';
 let eraserSizeKey = 'medium';
 
 const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d'); // 合成結果を描く
+const ctx = canvas.getContext('2d'); // 合成結果を描画
 const pagesBar   = document.getElementById('pages');
 const pageLabel  = document.getElementById('pageLabel');
 const statusEl   = document.getElementById('status');
@@ -131,13 +132,12 @@ const opacityVal   = document.getElementById('opacityVal');
 let drawing=false, erasing=false, last=null;
 let currentPage = 0;
 let activeLayer = 0;
-const undoStack = []; // アクティブレイヤーのスナップショット
-const UNDO_LIMIT = 50;
 
-// ページ：layers(各レイヤーCanvas) + opacity(各レイヤーα) + thumb
+// ページ：layers(各レイヤーCanvas) + opacity(各レイヤーα) + undos(各レイヤーの履歴) + thumb
 const pages = Array.from({length: PAGE_COUNT}, () => ({
   layers: Array.from({length: LAYER_COUNT}, ()=> null),
   opacity: Array.from({length: LAYER_COUNT}, ()=> 1),
+  undos:  Array.from({length: LAYER_COUNT}, ()=> []), // ★ ページ別・レイヤー別 Undo スタック
   dirty: false,
   thumbEl: null
 }));
@@ -220,7 +220,7 @@ function bindUI(){
     });
   });
 
-  // 不透明度スライダ
+  // 不透明度
   opacityRange.addEventListener('input', ()=>{
     const v = Math.max(0, Math.min(100, parseInt(opacityRange.value,10) || 100));
     pages[currentPage].opacity[activeLayer] = v/100;
@@ -229,18 +229,18 @@ function bindUI(){
     updateThumb(currentPage);
   });
 
-  // プレビュー（停止ボタンは常に有効にしておく）
+  // プレビュー（停止ボタンは常に有効）
   const playBtn = document.getElementById('playBtn');
   playBtn.onclick = ()=> isPreview ? stopPreview() : startPreview();
 
-  // 描画（アクティブレイヤーに描き、合成を再描画）
+  // 描画（アクティブレイヤーに描いたら即合成）
   canvas.addEventListener('pointerdown', (e)=>{
     if(isPreview) return;
     e.preventDefault();
     canvas.setPointerCapture(e.pointerId);
     drawing = true;
     last = getPos(e);
-    pushSnapshot();
+    pushSnapshot(); // ★ アクティブレイヤーの履歴に積む（ページ別）
   });
   canvas.addEventListener('pointermove', (e)=>{
     if(!drawing || isPreview) return;
@@ -268,7 +268,7 @@ function bindUI(){
     const isUndoKey = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase()==='z';
     if(isUndoKey && !isPreview){ e.preventDefault(); undo(); updateThumb(currentPage); }
   });
-  // 追加：Escでプレビュー停止
+  // Escでプレビュー停止
   window.addEventListener('keydown', (e)=>{
     if (e.key === 'Escape' && isPreview) { e.preventDefault(); stopPreview(); }
   });
@@ -285,9 +285,10 @@ function getPos(e){ const r = canvas.getBoundingClientRect(); return { x: e.clie
 /* ========= ページ切替/表示 ========= */
 function switchPage(i){
   if(i===currentPage) return;
-  updateThumb(currentPage);
+  updateThumb(currentPage); // 現ページのサムネを最新化
   currentPage = i;
   updatePageUI();
+  // レイヤー不透明度UI
   const op = pages[currentPage].opacity[activeLayer] ?? 1;
   opacityRange.value = Math.round(op*100);
   opacityVal.textContent = `${Math.round(op*100)}%`;
@@ -298,7 +299,7 @@ function switchPage(i){
 function updatePageUI(){
   pageLabel.textContent = `ページ ${currentPage+1} / ${PAGE_COUNT}`;
   Array.from(pagesBar.children).forEach((btn,idx)=> btn.classList.toggle('active', idx===currentPage));
-  undoStack.length = 0;
+  // ★ もう履歴は消さない（ページごとに保持）
 }
 
 function renderCurrentPage(){
@@ -350,6 +351,18 @@ function copyFromPreviousPage(){
   if(currentPage === 0) return;
   const src = pages[currentPage - 1];
   const dst = pages[currentPage];
+
+  // ★ コピー前に全レイヤーのスナップショットを積む（アクティブレイヤーだけで十分なら削除可）
+  for(let li=0; li<LAYER_COUNT; li++){
+    const dLayer = ensureLayer(currentPage, li);
+    const stack = dst.undos[li];
+    try{
+      const snap = dLayer.ctx.getImageData(0,0,CANVAS_W,CANVAS_H);
+      if(stack.length>=UNDO_LIMIT) stack.shift();
+      stack.push(snap);
+    }catch(e){}
+  }
+
   for(let li=0; li<LAYER_COUNT; li++){
     const dLayer = ensureLayer(currentPage, li);
     dLayer.ctx.clearRect(0,0,CANVAS_W,CANVAS_H);
@@ -365,6 +378,16 @@ function copyFromPreviousPage(){
 /* ========= 全消去（ページ内の全レイヤー） ========= */
 function clearPage(i){
   const p = pages[i];
+  // ★ クリアもUndo対象：全レイヤーのスナップショットを積む
+  for(let li=0; li<LAYER_COUNT; li++){
+    const layer = ensureLayer(i, li);
+    const stack = p.undos[li];
+    try{
+      const snap = layer.ctx.getImageData(0,0,CANVAS_W,CANVAS_H);
+      if(stack.length>=UNDO_LIMIT) stack.shift();
+      stack.push(snap);
+    }catch(e){}
+  }
   for(let li=0; li<LAYER_COUNT; li++){
     const layer = p.layers[li];
     if(layer){ layer.ctx.clearRect(0,0,CANVAS_W,CANVAS_H); }
@@ -374,22 +397,23 @@ function clearPage(i){
   updateThumb(i);
 }
 
-/* ========= Undo（アクティブレイヤー単位） ========= */
+/* ========= Undo（ページ×レイヤー別） ========= */
 function pushSnapshot(){
   try{
     const layer = ensureLayer(currentPage, activeLayer);
     const snap = layer.ctx.getImageData(0,0,CANVAS_W,CANVAS_H);
-    if(undoStack.length>=UNDO_LIMIT) undoStack.shift();
-    undoStack.push({ page: currentPage, layer: activeLayer, data: snap });
+    const stack = pages[currentPage].undos[activeLayer];
+    if(stack.length>=UNDO_LIMIT) stack.shift();
+    stack.push(snap);
   }catch(e){}
 }
 function undo(){
-  if(!undoStack.length) return;
-  const last = undoStack.pop();
-  const layer = ensureLayer(last.page, last.layer);
-  try{ layer.ctx.putImageData(last.data, 0, 0); }catch(e){}
-  if(last.page === currentPage) { renderCurrentPage(); updateThumb(currentPage); }
-  else { updateThumb(last.page); }
+  const stack = pages[currentPage].undos[activeLayer];
+  if(!stack || !stack.length) return;
+  const last = stack.pop();
+  const layer = ensureLayer(currentPage, activeLayer);
+  try{ layer.ctx.putImageData(last, 0, 0); }catch(e){}
+  renderCurrentPage();
 }
 
 /* ========= プレビュー ========= */
@@ -397,14 +421,15 @@ function startPreview(){
   previewFrames = [];
   for(let i=0;i<PAGE_COUNT;i++){
     const p = pages[i];
-    // どれかのレイヤーに内容があれば対象
     for(let li=0; li<LAYER_COUNT; li++){
-      if(p.layers[li]){ previewFrames.push(i); break; }
+      const layer = p.layers[li];
+      if(layer){ previewFrames.push(i); break; }
     }
   }
   if(previewFrames.length===0){ status('描画のあるページがありません（プレビューできません）'); return; }
   try{ previewBackup.image = ctx.getImageData(0,0,canvas.width,canvas.height); }catch{}
   previewBackup.pageIndex = currentPage;
+
   setEditingEnabled(false); isPreview = true; previewIndex = 0;
   document.getElementById('playBtn').textContent = '■ 停止'; status('プレビュー再生中…');
   renderPreviewFrame(); previewTimer = setInterval(renderPreviewFrame, getDelay());
@@ -413,6 +438,7 @@ function renderPreviewFrame(){
   const idx = previewFrames[previewIndex];
   Array.from(pagesBar.children).forEach((b, i)=> b.classList.toggle('active', i===idx));
   pageLabel.textContent = `ページ ${idx+1} / ${PAGE_COUNT}`;
+
   // 合成表示
   const p = pages[idx];
   ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
@@ -425,6 +451,7 @@ function renderPreviewFrame(){
     }
   }
   ctx.globalAlpha = 1;
+
   previewIndex = (previewIndex + 1) % previewFrames.length;
 }
 function stopPreview(){
@@ -432,7 +459,8 @@ function stopPreview(){
   clearInterval(previewTimer); previewTimer = null; isPreview = false;
   document.getElementById('playBtn').textContent = '▶︎ プレビュー';
   try{ if(previewBackup.image) ctx.putImageData(previewBackup.image,0,0); }catch{}
-  switchPage(previewBackup.pageIndex);
+  // ※ ページ切替は発生させない（Undo維持のため）→ もとのページ表示を再構築
+  renderCurrentPage();
   setEditingEnabled(true);
   status('プレビュー停止');
 }
