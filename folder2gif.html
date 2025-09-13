@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>フォルダ→高速GIF（低画質モード）</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP"; margin:0; padding:16px; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  label { display:flex; gap:6px; align-items:center; }
+  input[type="number"] { width:7em; }
+  button { padding:8px 12px; border-radius:8px; border:1px solid #9995; cursor:pointer; }
+  button.primary { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+  button:disabled { opacity:.6; cursor:not-allowed; }
+  #bar { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; width:320px; }
+  #fill { height:100%; width:0%; background:#3b82f6; }
+  #status { min-height:1.4em; }
+  .hint { font-size:12px; opacity:.75; }
+</style>
+<!-- gif.js (最適化版) -->
+<script src="https://cdn.jsdelivr.net/npm/gif.js.optimized/dist/gif.js"></script>
+</head>
+<body>
+  <h1>フォルダ→高速GIF（低画質）</h1>
+
+  <div class="row">
+    <!-- フォルダ選択（PC向け） -->
+    <input id="dir" type="file" webkitdirectory directory multiple />
+    <!-- 非対応環境向けの代替：複数ファイル選択 -->
+    <input id="files" type="file" accept="image/*" multiple />
+    <button id="preset" type="button">高速プリセット</button>
+  </div>
+
+  <div class="row" style="margin-top:8px;">
+    <label>長辺（px）<input id="edge" type="number" min="80" step="10" value="160"></label>
+    <label>最大フレーム数<input id="maxframes" type="number" min="5" step="5" value="30"></label>
+    <label>遅延(ms)<input id="delay" type="number" min="10" step="10" value="100"></label>
+    <button id="start" class="primary" disabled>GIFを作成</button>
+    <a id="dl" style="display:none" download="quick.gif"></a>
+  </div>
+
+  <div class="row" style="margin-top:8px;">
+    <div id="bar"><div id="fill"></div></div>
+    <div id="pct" style="width:60px;text-align:right;">0%</div>
+  </div>
+
+  <div id="status" style="margin-top:8px;"></div>
+  <div class="hint">
+    ※iOS/iPadOS Safariはフォルダ選択に非対応です。PCのChrome/Edgeを推奨。<br>
+    ※HEIC/HEIFはスキップします。JPG/PNG推奨。/ 枚数が多い場合は自動で間引きます。
+  </div>
+
+<script>
+const dirInput   = document.getElementById('dir');
+const filesInput = document.getElementById('files');
+const edgeEl     = document.getElementById('edge');
+const maxEl      = document.getElementById('maxframes');
+const delayEl    = document.getElementById('delay');
+const startBtn   = document.getElementById('start');
+const presetBtn  = document.getElementById('preset');
+const statusEl   = document.getElementById('status');
+const fill       = document.getElementById('fill');
+const pct        = document.getElementById('pct');
+const dlLink     = document.getElementById('dl');
+
+let pickedFiles = []; // File[]
+
+presetBtn.addEventListener('click', ()=>{
+  edgeEl.value = 160;   // 低解像度
+  maxEl.value  = 30;    // フレーム数制限
+  delayEl.value= 100;   // 10fps相当
+  status('高速プリセットを適用しました。');
+});
+
+dirInput.addEventListener('change', handlePick);
+filesInput.addEventListener('change', handlePick);
+
+function handlePick(e){
+  const fs = Array.from(e.target.files || []);
+  // 画像のみ、HEIC/HEIFを除外
+  pickedFiles = fs.filter(f => f.type.startsWith('image/') && !/heic|heif/i.test(f.name));
+  // パス（webkitRelativePath）または名前でソート
+  pickedFiles.sort((a,b)=>{
+    const pa = a.webkitRelativePath || a.name;
+    const pb = b.webkitRelativePath || b.name;
+    return pa.localeCompare(pb, undefined, {numeric:true, sensitivity:'base'});
+  });
+  if(!pickedFiles.length){
+    status('画像が選択されていません（JPG/PNGを選んでください）');
+    startBtn.disabled = true;
+    return;
+  }
+  status(`読み込み対象：${pickedFiles.length} 枚`);
+  startBtn.disabled = false;
+}
+
+startBtn.addEventListener('click', async ()=>{
+  if(!pickedFiles.length) return;
+  lock(true);
+  resetProgress();
+  try{
+    const TARGET_EDGE = clampInt(edgeEl.value, 80, 4000) || 160;
+    const MAX_FRAMES  = clampInt(maxEl.value, 5, 1000) || 30;
+    const DELAY_MS    = clampInt(delayEl.value, 10, 5000) || 100;
+
+    // 自動間引き：多い場合はスキップ
+    const total = pickedFiles.length;
+    const step  = Math.max(1, Math.ceil(total / MAX_FRAMES));
+    const used  = [];
+    for(let i=0;i<total;i+=step) used.push(pickedFiles[i]);
+
+    status(`エンコード準備中…（使用 ${used.length}/${total} 枚、間引き=${step - 1}枚おき）`);
+
+    // 1枚目から出力サイズを決定
+    const firstImg = await loadBitmapOrImage(used[0]);
+    const s0 = Math.min(1, TARGET_EDGE / Math.max(firstImg.width || firstImg.naturalWidth,
+                                                 firstImg.height || firstImg.naturalHeight));
+    const baseW = Math.max(1, Math.round((firstImg.width || firstImg.naturalWidth)  * s0));
+    const baseH = Math.max(1, Math.round((firstImg.height || firstImg.naturalHeight) * s0));
+
+    // オフスクリーン
+    const cvs = document.createElement('canvas');
+    const ctx = cvs.getContext('2d');
+    cvs.width = baseW; cvs.height = baseH;
+
+    // エンコーダ：低品質・高速寄せ
+    const cores = Math.min(Math.max((navigator.hardwareConcurrency || 2), 2), 8);
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const workers = isIOS ? 1 : cores; // iOSは1で安定
+    const gif = new GIF({
+      workers,
+      quality: 20,         // 値が大きいほど速い（粗い）
+      dither: false,       // ディザ無効でさらに速い
+      workerScript: 'https://cdn.jsdelivr.net/npm/gif.js.optimized/dist/gif.worker.js',
+      width: baseW,
+      height: baseH
+    });
+    gif.on('progress', p => progress
