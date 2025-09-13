@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>おえかき30ページ → プレビュー & GIF（サムネ・太さ）</title>
+<title>おえかき30ページ → プレビュー & GIF（サムネ・太さ・一括PNG）</title>
 <style>
   :root { color-scheme: light dark; }
   body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP"; background:#f6f7f9; }
@@ -20,7 +20,6 @@
   main { display:grid; grid-template-columns: 1fr; gap:10px; padding:10px; }
   .canvas-wrap { display:flex; justify-content:center; }
   canvas#canvas { background:#fff; border:1px solid #e5e7eb; border-radius:8px; touch-action:none; }
-  /* サムネ付きページ一覧（横スクロール） */
   .pages { display:flex; gap:8px; padding:8px 10px 10px; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; background:#f1f5f9; border-bottom:1px solid #e5e7eb; }
   .pagebtn { background:transparent; border:none; padding:0; display:inline-grid; gap:4px; justify-items:center; }
   .thumb { width:96px; height:72px; border:1px solid #e5e7eb; border-radius:6px; background:#fff; display:block; }
@@ -34,7 +33,10 @@
   .field { color:#e5e7eb; font-size:13px; }
   .field input { width:6em; padding:4px 6px; border-radius:6px; border:1px solid #64748b40; }
 </style>
+<!-- GIFエンコーダ（必要なら利用） -->
 <script src="https://cdn.jsdelivr.net/npm/gif.js.optimized/dist/gif.js"></script>
+<!-- ★ ZIP作成用ライブラリ -->
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 <body>
 <header>
@@ -52,6 +54,9 @@
     <span class="field">遅延(ms)：<input id="delayMs" type="number" min="10" step="10" value="100"></span>
     <button id="playBtn">▶︎ プレビュー</button>
     <button id="gifBtn" class="primary">GIF作成</button>
+    <!-- ★ 追加：一括PNG -->
+    <button id="pngDrawnBtn">PNG一括（描画のみ）</button>
+    <button id="pngAllBtn">PNG一括（全ページ）</button>
   </div>
 
   <div class="row">
@@ -82,7 +87,6 @@
 
 <main>
   <div class="canvas-wrap">
-    <!-- 編集用キャンバス（内部解像度は固定640×480） -->
     <canvas id="canvas" width="640" height="480"></canvas>
   </div>
   <div class="row" style="justify-content:center; gap:12px;">
@@ -95,10 +99,10 @@
 
 <script>
 /* ========= 定数・状態 ========= */
-const CANVAS_W = 640, CANVAS_H = 480; // 編集用サイズ（固定）
-const GIF_EDGE  = 320;                 // 出力GIFの長辺（小さめ固定）
-const PAGE_COUNT = 30;                 // 30ページ
-const TH_W = 96, TH_H = 72;            // サムネサイズ
+const CANVAS_W = 640, CANVAS_H = 480;
+const GIF_EDGE  = 320;
+const PAGE_COUNT = 30;
+const TH_W = 96, TH_H = 72;
 
 // 太さプリセット
 const PEN_SIZES = { small: 2,  medium: 4,  large: 8  };
@@ -121,7 +125,7 @@ let currentPage = 0;
 const undoStack = [];
 const UNDO_LIMIT = 50;
 
-// 各ページの内容（ImageData）と描いたかどうか、サムネCanvas参照
+// 各ページの内容とサムネCanvas
 const pages = Array.from({length: PAGE_COUNT}, () => ({ data: null, dirty: false, thumbEl: null }));
 
 // プレビュー管理
@@ -137,10 +141,9 @@ buildPageThumbnails();
 loadPage(0);
 bindUI();
 updatePageUI();
-updateThumb(0, fromLive=true);
+updateThumb(0, true);
 
 function initCanvas(){
-  // 背景白
   ctx.fillStyle = '#fff';
   ctx.fillRect(0,0,canvas.width,canvas.height);
 }
@@ -159,7 +162,6 @@ function buildPageThumbnails(){
     btn.addEventListener('click', ()=> switchPage(i));
     pagesBar.appendChild(btn);
     pages[i].thumbEl = th;
-    // 初期は白サムネ
     const tctx = th.getContext('2d');
     tctx.fillStyle = '#fff'; tctx.fillRect(0,0,TH_W,TH_H);
   }
@@ -175,6 +177,10 @@ function bindUI(){
   document.getElementById('nextBtn').onclick   = ()=>{ if(!isPreview) switchPage(Math.min(PAGE_COUNT-1, currentPage+1)); };
   document.getElementById('gifBtn').onclick    = exportGIF;
 
+  // ★ PNG一括
+  document.getElementById('pngDrawnBtn').onclick = ()=> exportAllPNGs({ includeEmpty:false });
+  document.getElementById('pngAllBtn').onclick   = ()=> exportAllPNGs({ includeEmpty:true });
+
   const playBtn = document.getElementById('playBtn');
   playBtn.onclick = ()=> isPreview ? stopPreview() : startPreview();
 
@@ -182,33 +188,30 @@ function bindUI(){
   bindSizeSegment('penSizeSeg',  (k)=>{ penSizeKey = k; });
   bindSizeSegment('eraserSizeSeg',(k)=>{ eraserSizeKey = k; });
 
-  // 描画（Pointer: マウス/タッチ/Apple Pencil共通）
+  // 描画
   canvas.addEventListener('pointerdown', (e)=>{
     if(isPreview) return;
     e.preventDefault();
     canvas.setPointerCapture(e.pointerId);
     drawing = true;
     last = getPos(e);
-    pushSnapshot(); // ストローク開始前に履歴
+    pushSnapshot();
   });
   canvas.addEventListener('pointermove', (e)=>{
     if(!drawing || isPreview) return;
     const p = getPos(e);
     ctx.strokeStyle = erasing ? '#fff' : '#000';
     ctx.lineWidth = erasing ? ERASER_SIZES[eraserSizeKey] : PEN_SIZES[penSizeKey];
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     ctx.beginPath(); ctx.moveTo(last.x,last.y); ctx.lineTo(p.x,p.y); ctx.stroke();
     last = p;
     pages[currentPage].dirty = true;
   });
   ['pointerup','pointercancel','pointerleave'].forEach(ev => canvas.addEventListener(ev, ()=>{
-    drawing=false; last=null;
-    // ストローク終了ごとにサムネ更新
-    updateThumb(currentPage, true);
+    drawing=false; last=null; updateThumb(currentPage, true);
   }));
 
-  // ショートカット（戻る）
+  // 戻るショートカット
   window.addEventListener('keydown', (e)=>{
     const isUndoKey = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase()==='z';
     if(isUndoKey && !isPreview){ e.preventDefault(); undo(); updateThumb(currentPage, true); }
@@ -230,73 +233,42 @@ function setActive(id){
   ['penBtn','eraserBtn'].forEach(x=>document.getElementById(x).classList.remove('primary'));
   document.getElementById(id).classList.add('primary');
 }
-
-function getPos(e){
-  const r = canvas.getBoundingClientRect();
-  return { x: e.clientX - r.left, y: e.clientY - r.top };
-}
+function getPos(e){ const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 
 /* ========= ページ切替 ========= */
 function switchPage(i){
   if(i===currentPage) return;
-  // 現在ページを保存しつつサムネ更新（ライブから）
-  savePage(currentPage);
-  updateThumb(currentPage, true);
-
-  loadPage(i);
-  currentPage = i;
-  updatePageUI();
+  savePage(currentPage); updateThumb(currentPage, true);
+  loadPage(i); currentPage = i; updatePageUI();
 }
 function updatePageUI(){
   pageLabel.textContent = `ページ ${currentPage+1} / ${PAGE_COUNT}`;
   Array.from(pagesBar.children).forEach((btn,idx)=> btn.classList.toggle('active', idx===currentPage));
-  undoStack.length = 0; // ページ切替でUndo履歴はクリア
+  undoStack.length = 0;
 }
-
-function savePage(i){
-  try{ pages[i].data = ctx.getImageData(0,0,canvas.width,canvas.height); }catch(e){ console.warn('savePage失敗', e); }
-}
+function savePage(i){ try{ pages[i].data = ctx.getImageData(0,0,canvas.width,canvas.height); }catch(e){} }
 function loadPage(i){
   clearCanvas();
-  if(pages[i].data){
-    try{ ctx.putImageData(pages[i].data, 0, 0); }catch(e){ console.warn('loadPage失敗', e); }
-  }
+  if(pages[i].data){ try{ ctx.putImageData(pages[i].data, 0, 0); }catch(e){} }
 }
-function clearCanvas(){
-  ctx.save(); ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore();
-}
+function clearCanvas(){ ctx.save(); ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore(); }
 
-/* ========= サムネ更新 ========= */
-/** updateThumb(index, fromLive=false)
- *  fromLive=true のときは現在キャンバス内容を直接縮小して反映（高速）
- *  それ以外は保存済み ImageData から反映
- */
+/* ========= サムネ ========= */
 function updateThumb(index, fromLive=false){
-  const th = pages[index]?.thumbEl;
-  if(!th) return;
+  const th = pages[index]?.thumbEl; if(!th) return;
   const tctx = th.getContext('2d');
-  tctx.fillStyle = '#fff';
-  tctx.fillRect(0,0,TH_W,TH_H);
-
+  tctx.fillStyle = '#fff'; tctx.fillRect(0,0,TH_W,TH_H);
   try{
     if(fromLive && index===currentPage){
-      // 編集キャンバスから直接縮小描画
-      tctx.imageSmoothingEnabled = true;
-      tctx.imageSmoothingQuality = 'high';
+      tctx.imageSmoothingEnabled = true; tctx.imageSmoothingQuality = 'high';
       tctx.drawImage(canvas, 0, 0, TH_W, TH_H);
     } else if (pages[index].data){
-      // ImageData → 一時キャンバス → 縮小描画
-      const tmp = document.createElement('canvas');
-      tmp.width = CANVAS_W; tmp.height = CANVAS_H;
-      const c = tmp.getContext('2d');
-      c.putImageData(pages[index].data, 0, 0);
-      tctx.imageSmoothingEnabled = true;
-      tctx.imageSmoothingQuality = 'high';
+      const tmp = document.createElement('canvas'); tmp.width=CANVAS_W; tmp.height=CANVAS_H;
+      const c = tmp.getContext('2d'); c.putImageData(pages[index].data, 0, 0);
+      tctx.imageSmoothingEnabled = true; tctx.imageSmoothingQuality = 'high';
       tctx.drawImage(tmp, 0, 0, TH_W, TH_H);
     }
-  }catch(e){
-    console.warn('updateThumb失敗', e);
-  }
+  }catch(e){}
 }
 
 /* ========= Undo ========= */
@@ -305,15 +277,11 @@ function pushSnapshot(){
     const snap = ctx.getImageData(0,0,canvas.width,canvas.height);
     if(undoStack.length>=UNDO_LIMIT) undoStack.shift();
     undoStack.push(snap);
-  }catch(e){ console.warn('snapshot失敗', e); }
+  }catch(e){}
 }
-function undo(){
-  if(!undoStack.length) return;
-  const prev = undoStack.pop();
-  try{ ctx.putImageData(prev,0,0); }catch(e){ console.warn('undo失敗', e); }
-}
+function undo(){ if(!undoStack.length) return; const prev = undoStack.pop(); try{ ctx.putImageData(prev,0,0); }catch(e){} }
 
-/* ========= PNG保存（現在の1ページ） ========= */
+/* ========= PNG保存（現在ページ） ========= */
 function saveCurrentPNG(){
   const a = document.createElement('a');
   a.download = `page-${String(currentPage+1).padStart(2,'0')}.png`;
@@ -321,139 +289,150 @@ function saveCurrentPNG(){
   a.click();
 }
 
-/* ========= プレビュー ========= */
+/* ========= プレビュー（既存） ========= */
 function startPreview(){
-  savePage(currentPage);
-  updateThumb(currentPage, true);
-
-  // 空ページはスキップ
+  savePage(currentPage); updateThumb(currentPage, true);
   previewFrames = [];
-  for(let i=0;i<PAGE_COUNT;i++){
-    if(pages[i].dirty && pages[i].data) previewFrames.push(i);
-  }
-  if(previewFrames.length===0){
-    status('描画のあるページがありません（プレビューできません）'); return;
-  }
-
-  // バックアップ
+  for(let i=0;i<PAGE_COUNT;i++){ if(pages[i].dirty && pages[i].data) previewFrames.push(i); }
+  if(previewFrames.length===0){ status('描画のあるページがありません（プレビューできません）'); return; }
   try{ previewBackup.image = ctx.getImageData(0,0,canvas.width,canvas.height); }catch{}
   previewBackup.pageIndex = currentPage;
-
-  setEditingEnabled(false);
-  isPreview = true;
-  previewIndex = 0;
-  document.getElementById('playBtn').textContent = '■ 停止';
-  status('プレビュー再生中…');
-
-  const delay = getDelay();
-  renderPreviewFrame();
-  previewTimer = setInterval(renderPreviewFrame, delay);
+  setEditingEnabled(false); isPreview = true; previewIndex = 0;
+  document.getElementById('playBtn').textContent = '■ 停止'; status('プレビュー再生中…');
+  renderPreviewFrame(); previewTimer = setInterval(renderPreviewFrame, getDelay());
 }
 function renderPreviewFrame(){
   const idx = previewFrames[previewIndex];
   Array.from(pagesBar.children).forEach((b, i)=> b.classList.toggle('active', i===idx));
   pageLabel.textContent = `ページ ${idx+1} / ${PAGE_COUNT}`;
-
-  clearCanvas();
-  try{ ctx.putImageData(pages[idx].data, 0, 0); }catch(e){ console.warn('preview復元失敗', e); }
+  clearCanvas(); try{ ctx.putImageData(pages[idx].data, 0, 0); }catch(e){}
   previewIndex = (previewIndex + 1) % previewFrames.length;
 }
 function stopPreview(){
   if(!isPreview) return;
-  clearInterval(previewTimer);
-  previewTimer = null;
-  isPreview = false;
+  clearInterval(previewTimer); previewTimer = null; isPreview = false;
   document.getElementById('playBtn').textContent = '▶︎ プレビュー';
-
-  // 復元
-  try{ if(previewBackup.image) ctx.putImageData(previewBackup.image, 0, 0); }catch{}
-  switchPage(previewBackup.pageIndex);
-  setEditingEnabled(true);
-  status('プレビュー停止');
+  try{ if(previewBackup.image) ctx.putImageData(previewBackup.image,0,0); }catch{}
+  switchPage(previewBackup.pageIndex); setEditingEnabled(true); status('プレビュー停止');
 }
 function setEditingEnabled(enabled){
-  ['penBtn','eraserBtn','undoBtn','clearBtn','saveBtn','prevBtn','nextBtn','gifBtn']
+  ['penBtn','eraserBtn','undoBtn','clearBtn','saveBtn','prevBtn','nextBtn','gifBtn','pngDrawnBtn','pngAllBtn']
     .forEach(id => document.getElementById(id).disabled = !enabled);
   delayInput.disabled = !enabled;
-  // サイズ切替もロック
   document.querySelectorAll('#penSizeSeg button, #eraserSizeSeg button')
     .forEach(b=> b.disabled = !enabled);
 }
 
-/* ========= GIF作成 ========= */
+/* ========= GIF作成（既存） ========= */
 async function exportGIF(){
   if(isPreview) return;
-  resetProgress(); clearError();
-  status('GIFを準備中…');
+  resetProgress(); clearError(); status('GIFを準備中…');
+  savePage(currentPage); updateThumb(currentPage, true);
 
-  savePage(currentPage);
-  updateThumb(currentPage, true);
-
-  const targets = [];
-  for(let i=0;i<PAGE_COUNT;i++){
-    if(pages[i].dirty && pages[i].data) targets.push(i);
-  }
+  const targets = []; for(let i=0;i<PAGE_COUNT;i++){ if(pages[i].dirty && pages[i].data) targets.push(i); }
   if(targets.length===0){ status('描画のあるページがありません。'); return; }
 
-  // 出力サイズ（長辺=GIF_EDGE）
   const s = Math.min(1, GIF_EDGE / Math.max(CANVAS_W, CANVAS_H));
   const outW = Math.max(1, Math.round(CANVAS_W * s));
   const outH = Math.max(1, Math.round(CANVAS_H * s));
-  const out = document.createElement('canvas');
-  const octx = out.getContext('2d');
+  const out = document.createElement('canvas'); const octx = out.getContext('2d');
   out.width = outW; out.height = outH;
 
-  // iOS/Safari はワーカー1で安定
-  const ua = navigator.userAgent;
-  const isIOS = /iPad|iPhone|iPod/.test(ua);
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
   const cores = isIOS ? 1 : Math.min(Math.max((navigator.hardwareConcurrency||2),2),8);
-
-  const gif = new GIF({
-    workers: cores,
-    quality: 20,
-    dither: false,
-    workerScript: 'https://cdn.jsdelivr.net/npm/gif.js.optimized/dist/gif.worker.js',
-    width: outW, height: outH
-  });
-
+  const gif = new GIF({ workers: cores, quality: 20, dither: false,
+                        workerScript: 'https://cdn.jsdelivr.net/npm/gif.js.optimized/dist/gif.worker.js',
+                        width: outW, height: outH });
   gif.on('progress', p => progress(p));
-  gif.on('finished', (blob)=>{
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'animation.gif';
-    a.click();
-    setTimeout(()=> URL.revokeObjectURL(url), 10000);
+  gif.on('finished', (blob)=>{ const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download='animation.gif'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),10000);
     progress(1); status(`完成：${targets.length}フレーム / ${getDelay()}ms`);
   });
 
   for(const idx of targets){
     try{
-      // 編集サイズ→出力サイズへ縮小転写
-      const tmp = document.createElement('canvas');
-      tmp.width = CANVAS_W; tmp.height = CANVAS_H;
-      const tctx = tmp.getContext('2d');
-      tctx.putImageData(pages[idx].data, 0, 0);
-
-      octx.fillStyle = '#ffffff';
-      octx.fillRect(0,0,outW,outH);
-      octx.imageSmoothingEnabled = true;
-      octx.imageSmoothingQuality = 'high';
-      octx.drawImage(tmp, 0, 0, outW, outH);
-
-      gif.addFrame(out, { copy:true, delay: getDelay() });
-      status(`フレーム追加中… ページ${idx+1}`);
-      await microtask();
-    }catch(e){
-      logError(`ページ${idx+1}のフレーム追加に失敗：${e?.message||e}`);
-    }
+      const tmp = document.createElement('canvas'); tmp.width=CANVAS_W; tmp.height=CANVAS_H;
+      const tctx = tmp.getContext('2d'); tctx.putImageData(pages[idx].data,0,0);
+      octx.fillStyle='#ffffff'; octx.fillRect(0,0,outW,outH);
+      octx.imageSmoothingEnabled=true; octx.imageSmoothingQuality='high';
+      octx.drawImage(tmp,0,0,outW,outH);
+      gif.addFrame(out,{copy:true, delay:getDelay()});
+      status(`フレーム追加中… ページ${idx+1}`); await microtask();
+    }catch(e){ logError(`ページ${idx+1}のフレーム追加に失敗：${e?.message||e}`); }
   }
-
   if(!gif.frames || gif.frames.length===0){ status('エラー：有効なフレームがありません。'); return; }
-  status('エンコード中…');
-  gif.render();
+  status('エンコード中…'); gif.render();
 }
 
-/* ========= 進捗＆メッセージ ========= */
+/* ========= ★ PNG一括エクスポート（ZIP） ========= */
+async function exportAllPNGs({ includeEmpty }){
+  if(isPreview) return;
+  resetProgress(); clearError();
+  status(includeEmpty ? '全ページをPNG化してZIP作成中…' : '描画ページをPNG化してZIP作成中…');
+  setEditingEnabled(false);
+
+  // 最新状態を反映
+  savePage(currentPage); updateThumb(currentPage, true);
+
+  // 対象ページ
+  const targets = [];
+  for(let i=0;i<PAGE_COUNT;i++){
+    if(includeEmpty || (pages[i].dirty && pages[i].data)) targets.push(i);
+  }
+  if(targets.length===0){ status('出力対象のページがありません。'); setEditingEnabled(true); return; }
+
+  // 出力サイズ（編集サイズそのまま）
+  const out = document.createElement('canvas'); const octx = out.getContext('2d');
+  out.width = CANVAS_W; out.height = CANVAS_H;
+
+  const zip = new JSZip();
+  for(let k=0;k<targets.length;k++){
+    const idx = targets[k];
+    // ページの内容を転写（空ページは白塗り）
+    octx.fillStyle='#ffffff'; octx.fillRect(0,0,CANVAS_W,CANVAS_H);
+    if(pages[idx].data){
+      const tmp = document.createElement('canvas'); tmp.width=CANVAS_W; tmp.height=CANVAS_H;
+      const tctx = tmp.getContext('2d'); tctx.putImageData(pages[idx].data,0,0);
+      octx.drawImage(tmp,0,0);
+    }
+    const blob = await canvasToBlob(out, 'image/png');
+    const name = `page-${String(idx+1).padStart(2,'0')}.png`;
+    zip.file(name, blob);
+    status(`PNG作成中… ${k+1}/${targets.length}`);
+    progress((k+1)/targets.length);
+    await microtask();
+  }
+
+  status('ZIP を生成中…');
+  const blobZip = await zip.generateAsync({ type:'blob' }, (meta)=>{ progress(meta.percent/100); });
+
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blobZip);
+  a.download = `oeaki-pages.zip`;
+  a.click();
+  setTimeout(()=> URL.revokeObjectURL(a.href), 10000);
+
+  status('ZIPのダウンロードを開始しました。');
+  setEditingEnabled(true);
+}
+
+function canvasToBlob(c, type='image/png'){
+  return new Promise(resolve=>{
+    if(c.toBlob){ c.toBlob(b=> resolve(b), type); }
+    else{
+      const dataURL = c.toDataURL(type);
+      const byteString = atob(dataURL.split(',')[1]);
+      const mime = dataURL.split(',')[0].match(/:(.*?);/)[1];
+      const ab = new ArrayBuffer(byteString.length);
+      const ia = new Uint8Array(ab);
+      for(let i=0;i<byteString.length;i++) ia[i]=byteString.charCodeAt(i);
+      resolve(new Blob([ab], {type:mime}));
+    }
+  });
+}
+
+/* ========= 進捗＆ユーティリティ ========= */
 function resetProgress(){ fill.style.width='0%'; pct.textContent='0%'; }
 function progress(p){ const v=Math.max(0,Math.min(1,p)); fill.style.width=(v*100).toFixed(0)+'%'; pct.textContent=(v*100).toFixed(0)+'%'; }
 function status(t){ statusEl.textContent = t; }
