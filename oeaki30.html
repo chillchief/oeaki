@@ -534,12 +534,17 @@ function canvasToBlob(c, type='image/png'){
 function setEditingEnabled(enabled){
   [
     'penBtn','eraserBtn','undoBtn','clearPageBtn','saveBtn',
-    'copyPrevBtn','prevBtn','nextBtn','pngAllBtn','playBtn','toggleThumbsBtn'
+    'copyPrevBtn','prevBtn','nextBtn','pngAllBtn','toggleThumbsBtn'
   ].forEach(id => document.getElementById(id).disabled = !enabled);
+
+  // ★ プレビューの開始/停止ボタンは常に押せるようにする
+  document.getElementById('playBtn').disabled = false;
+
   delayInput.disabled = !enabled;
   opacityRange.disabled = !enabled;
   document.querySelectorAll('#layerSeg button').forEach(b=> b.disabled = !enabled);
 }
+
 
 function resetProgress(){ fill.style.width='0%'; pct.textContent='0%'; }
 function progress(p){ const v=Math.max(0,Math.min(1,p)); fill.style.width=(v*100).toFixed(0)+'%'; pct.textContent=(v*100).toFixed(0)+'%'; }
