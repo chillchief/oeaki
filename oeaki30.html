@@ -191,4 +191,172 @@ function bindUI(){
     last = p;
     pages[currentPage].dirty = true;
   });
-  ['pointerup','poin]()
+  ['pointerup','pointercancel','pointerleave'].forEach(ev => canvas.addEventListener(ev, ()=>{
+    drawing=false; last=null; updateThumb(currentPage, true);
+  }));
+
+  // 戻るショートカット
+  window.addEventListener('keydown', (e)=>{
+    const isUndoKey = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase()==='z';
+    if(isUndoKey && !isPreview){ e.preventDefault(); undo(); updateThumb(currentPage, true); }
+  });
+}
+
+function setActive(id){
+  ['penBtn','eraserBtn'].forEach(x=>document.getElementById(x).classList.remove('primary'));
+  document.getElementById(id).classList.add('primary');
+}
+function getPos(e){ const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+
+/* ========= ページ切替 ========= */
+function switchPage(i){
+  if(i===currentPage) return;
+  savePage(currentPage); updateThumb(currentPage, true);
+  loadPage(i); currentPage = i; updatePageUI();
+}
+function updatePageUI(){
+  pageLabel.textContent = `ページ ${currentPage+1} / ${PAGE_COUNT}`;
+  Array.from(pagesBar.children).forEach((btn,idx)=> btn.classList.toggle('active', idx===currentPage));
+  undoStack.length = 0;
+}
+function savePage(i){ try{ pages[i].data = ctx.getImageData(0,0,canvas.width,canvas.height); }catch(e){} }
+function loadPage(i){
+  clearCanvas();
+  if(pages[i].data){ try{ ctx.putImageData(pages[i].data, 0, 0); }catch(e){} }
+}
+function clearCanvas(){ ctx.save(); ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore(); }
+
+/* ========= サムネ ========= */
+function updateThumb(index, fromLive=false){
+  const th = pages[index]?.thumbEl; if(!th) return;
+  const tctx = th.getContext('2d');
+  tctx.fillStyle = '#fff'; tctx.fillRect(0,0,TH_W,TH_H);
+  try{
+    if(fromLive && index===currentPage){
+      tctx.imageSmoothingEnabled = true; tctx.imageSmoothingQuality = 'high';
+      tctx.drawImage(canvas, 0, 0, TH_W, TH_H);
+    } else if (pages[index].data){
+      const tmp = document.createElement('canvas'); tmp.width=CANVAS_W; tmp.height=CANVAS_H;
+      const c = tmp.getContext('2d'); c.putImageData(pages[index].data, 0, 0);
+      tctx.imageSmoothingEnabled = true; tctx.imageSmoothingQuality = 'high';
+      tctx.drawImage(tmp, 0, 0, TH_W, TH_H);
+    }
+  }catch(e){}
+}
+
+/* ========= Undo ========= */
+function pushSnapshot(){
+  try{
+    const snap = ctx.getImageData(0,0,canvas.width,canvas.height);
+    if(undoStack.length>=UNDO_LIMIT) undoStack.shift();
+    undoStack.push(snap);
+  }catch(e){}
+}
+function undo(){ if(!undoStack.length) return; const prev = undoStack.pop(); try{ ctx.putImageData(prev,0,0); }catch(e){} }
+
+/* ========= PNG一括（全ページ→ZIP） ========= */
+async function exportAllPNGs({ includeEmpty }){
+  if(isPreview) return;
+  resetProgress(); clearError();
+  status('全ページをPNG化してZIP作成中…');
+  setEditingEnabled(false);
+
+  savePage(currentPage); updateThumb(currentPage, true);
+
+  const targets = [];
+  for(let i=0;i<PAGE_COUNT;i++){
+    if(includeEmpty || (pages[i].dirty && pages[i].data)) targets.push(i);
+  }
+  if(targets.length===0){ status('出力対象のページがありません。'); setEditingEnabled(true); return; }
+
+  const out = document.createElement('canvas'); const octx = out.getContext('2d');
+  out.width = CANVAS_W; out.height = CANVAS_H;
+
+  const zip = new JSZip();
+  for(let k=0;k<targets.length;k++){
+    const idx = targets[k];
+    octx.fillStyle='#ffffff'; octx.fillRect(0,0,CANVAS_W,CANVAS_H);
+    if(pages[idx].data){
+      const tmp = document.createElement('canvas'); tmp.width=CANVAS_W; tmp.height=CANVAS_H;
+      const tctx = tmp.getContext('2d'); tctx.putImageData(pages[idx].data,0,0);
+      octx.drawImage(tmp,0,0);
+    }
+    const blob = await canvasToBlob(out, 'image/png');
+    const name = `page-${String(idx+1).padStart(2,'0')}.png`;
+    zip.file(name, blob);
+    status(`PNG作成中… ${k+1}/${targets.length}`);
+    progress((k+1)/targets.length);
+    await microtask();
+  }
+
+  status('ZIP を生成中…');
+  const blobZip = await zip.generateAsync({ type:'blob' }, (meta)=>{ progress(meta.percent/100); });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blobZip);
+  a.download = `oeaki-pages.zip`;
+  a.click();
+  setTimeout(()=> URL.revokeObjectURL(a.href), 10000);
+
+  status('ZIPのダウンロードを開始しました。');
+  setEditingEnabled(true);
+}
+
+function canvasToBlob(c, type='image/png'){
+  return new Promise(resolve=>{
+    if(c.toBlob){ c.toBlob(b=> resolve(b), type); }
+    else{
+      const dataURL = c.toDataURL(type);
+      const byteString = atob(dataURL.split(',')[1]);
+      const mime = dataURL.split(',')[0].match(/:(.*?);/)[1];
+      const ab = new ArrayBuffer(byteString.length);
+      const ia = new Uint8Array(ab);
+      for(let i=0;i<byteString.length;i++) ia[i]=byteString.charCodeAt(i);
+      resolve(new Blob([ab], {type:mime}));
+    }
+  });
+}
+
+/* ========= プレビュー ========= */
+function startPreview(){
+  savePage(currentPage); updateThumb(currentPage, true);
+  previewFrames = [];
+  for(let i=0;i<PAGE_COUNT;i++){ if(pages[i].dirty && pages[i].data) previewFrames.push(i); }
+  if(previewFrames.length===0){ status('描画のあるページがありません（プレビューできません）'); return; }
+  try{ previewBackup.image = ctx.getImageData(0,0,canvas.width,canvas.height); }catch{}
+  previewBackup.pageIndex = currentPage;
+  setEditingEnabled(false); isPreview = true; previewIndex = 0;
+  document.getElementById('playBtn').textContent = '■ 停止'; status('プレビュー再生中…');
+  renderPreviewFrame(); previewTimer = setInterval(renderPreviewFrame, getDelay());
+}
+function renderPreviewFrame(){
+  const idx = previewFrames[previewIndex];
+  Array.from(pagesBar.children).forEach((b, i)=> b.classList.toggle('active', i===idx));
+  pageLabel.textContent = `ページ ${idx+1} / ${PAGE_COUNT}`;
+  clearCanvas(); try{ ctx.putImageData(pages[idx].data, 0, 0); }catch(e){}
+  previewIndex = (previewIndex + 1) % previewFrames.length;
+}
+function stopPreview(){
+  if(!isPreview) return;
+  clearInterval(previewTimer); previewTimer = null; isPreview = false;
+  document.getElementById('playBtn').textContent = '▶︎ プレビュー';
+  try{ if(previewBackup.image) ctx.putImageData(previewBackup.image,0,0); }catch{}
+  switchPage(previewBackup.pageIndex); setEditingEnabled(true); status('プレビュー停止');
+}
+function setEditingEnabled(enabled){
+  // ※ GIF作成/PNG描画のみのボタンは削除済み
+  ['penBtn','eraserBtn','undoBtn','clearBtn','saveBtn','prevBtn','nextBtn','pngAllBtn','playBtn','toggleThumbsBtn']
+    .forEach(id => document.getElementById(id).disabled = !enabled);
+  delayInput.disabled = !enabled;
+}
+
+/* ========= 進捗＆ユーティリティ ========= */
+function resetProgress(){ fill.style.width='0%'; pct.textContent='0%'; }
+function progress(p){ const v=Math.max(0,Math.min(1,p)); fill.style.width=(v*100).toFixed(0)+'%'; pct.textContent=(v*100).toFixed(0)+'%'; }
+function status(t){ statusEl.textContent = t; }
+function clearError(){ errEl.textContent=''; }
+function logError(t){ errEl.textContent += (t+'\n'); }
+function microtask(){ return new Promise(r=>setTimeout(r,0)); }
+function getDelay(){ const n = parseInt(delayInput.value, 10); return Number.isFinite(n) ? Math.max(10, n) : 100; }
+</script>
+</body>
+</html>
