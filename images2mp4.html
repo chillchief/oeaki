@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>画像→MP4（高速5秒モード）</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP"; margin:0; padding:16px; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  label { display:flex; gap:6px; align-items:center; }
+  input[type="number"] { width:7em; }
+  select { padding:4px 6px; }
+  button { padding:8px 12px; border-radius:8px; border:1px solid #9995; cursor:pointer; }
+  button.primary { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+  button:disabled { opacity:.6; cursor:not-allowed; }
+  #bar { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; width:320px; }
+  #fill { height:100%; width:0%; background:#3b82f6; }
+  #status { min-height:1.4em; }
+  .hint { font-size:12px; opacity:.75; }
+</style>
+</head>
+<body>
+  <h1>画像→MP4（高速5秒モード）</h1>
+
+  <div class="row">
+    <!-- PC向け：フォルダ選択（iOS Safariは非対応） -->
+    <input id="dir" type="file" webkitdirectory directory multiple />
+    <!-- 代替：複数ファイル選択（iPad等はこちら） -->
+    <input id="files" type="file" accept="image/*" multiple />
+    <button id="preset" type="button">5秒プリセット</button>
+  </div>
+
+  <div class="row" style="margin-top:8px;">
+    <label>目標尺（秒）<input id="duration" type="number" min="1" step="1" value="5"></label>
+    <label>最大FPS
+      <select id="fps">
+        <option>10</option><option selected>15</option><option>24</option><option>30</option>
+      </select>
+    </label>
+    <label>長辺（px）
+      <select id="edge">
+        <option>240</option><option selected>320</option><option>480</option><option>640</option>
+      </select>
+    </label>
+    <label>余白色
+      <select id="bg">
+        <option value="#000">黒</option>
+        <option value="#fff" selected>白</option>
+      </select>
+    </label>
+    <button id="start" class="primary" disabled>MP4を作成</button>
+    <a id="dl" style="display:none" download="quick.mp4"></a>
+  </div>
+
+  <div class="row" style="margin-top:8px;">
+    <div id="bar"><div id="fill"></div></div>
+    <div id="pct" style="width:60px;text-align:right;">0%</div>
+  </div>
+
+  <div id="status" style="margin-top:8px;"></div>
+  <div class="hint">
+    ※MP4は対応ブラウザで出力されます。未対応の場合はWebMになります。<br>
+    ※HEIC/HEIFは読み込めないことがあります。JPG/PNG推奨。<br>
+    ※録画は「ほぼ目標尺の実時間」で完了します（例：5秒なら約5秒）。
+  </div>
+
+<script>
+const dirInput   = document.getElementById('dir');
+const filesInput = document.getElementById('files');
+const durationEl = document.getElementById('duration');
+const fpsEl      = document.getElementById('fps');
+const edgeEl     = document.getElementById('edge');
+const bgEl       = document.getElementById('bg');
+const startBtn   = document.getElementById('start');
+const presetBtn  = document.getElementById('preset');
+const statusEl   = document.getElementById('status');
+const fill       = document.getElementById('fill');
+const pct        = document.getElementById('pct');
+const dlLink     = document.getElementById('dl');
+
+let pickedFiles = []; // File[]
+
+presetBtn.addEventListener('click', ()=>{
+  durationEl.value = 5;  fpsEl.value = '15';  edgeEl.value = '320';
+  status('5秒プリセットを適用しました。');
+});
+
+dirInput.addEventListener('change', handlePick);
+filesInput.addEventListener('change', handlePick);
+
+function handlePick(e){
+  const fs = Array.from(e.target.files || []);
+  pickedFiles = fs.filter(f => f.type.startsWith('image/') && !/heic|heif/i.test(f.name));
+  // 相対パス→自然順でソート
+  pickedFiles.sort((a,b)=>{
+    const pa = a.webkitRelativePath || a.name;
+    const pb = b.webkitRelativePath || b.name;
+    return pa.localeCompare(pb, undefined, {numeric:true, sensitivity:'base'});
+  });
+  if(!pickedFiles.length){
+    status('画像が選択されていません（JPG/PNGを選んでください）');
+    startBtn.disabled = true;
+    return;
+  }
+  status(`読み込み対象：${pickedFiles.length} 枚`);
+  startBtn.disabled = false;
+}
+
+startBtn.addEventListener('click', async ()=>{
+  if(!pickedFiles.length) return;
+
+  // —— 設定値取得
+  const DURATION_S = clampInt(durationEl.value, 1, 300) || 5;     // 目標尺（秒）
+  const MAX_FPS    = clampInt(fpsEl.value, 1, 60) || 15;          // 上限FPS
+  const EDGE       = clampInt(edgeEl.value, 80, 4000) || 320;     // 長辺
+  const BG         = bgEl.value || '#fff';
+
+  // —— フレーム選抜（均等間引き）→ 目標総フレーム数 = DURATION_S * MAX_FPS
+  const targetFrames = Math.max(1, DURATION_S * MAX_FPS);
+  const total = pickedFiles.length;
+  const step  = Math.max(1, Math.ceil(total / targetFrames));
+  const used  = [];
+  for(let i=0;i<total;i+=step) used.push(pickedFiles[i]);
+  const FPS = Math.min(MAX_FPS, Math.ceil(used.length / DURATION_S)); // 実際のFPS（均等化）
+
+  status(`準備中… 使用 ${used.length}/${total} 枚、FPS=${FPS}、目標 ${DURATION_S}s`);
+  resetProgress(); progress(0);
+
+  // —— 1枚目から出力サイズ決定
+  const first = await loadBitmapOrImage(used[0]);
+  const w0 = first.width || first.naturalWidth, h0 = first.height || first.naturalHeight;
+  const s0 = Math.min(1, EDGE / Math.max(w0, h0));
+  const baseW = Math.max(1, Math.round(w0 * s0));
+  const baseH = Math.max(1, Math.round(h0 * s0));
+  // 描画用Canvas
+  const cvs = document.createElement('canvas');
+  cvs.width = baseW; cvs.height = baseH;
+  const ctx = cvs.getContext('2d');
+
+  // —— 録画トラック準備（MP4優先／フォールバックあり）
+  // Safariなど：video/mp4（H.264）／Chrome等：video/webm（VP8/9）
+  let mime = '';
+  if (MediaRecorder.isTypeSupported('video/mp4;codecs="avc1.42E01E"')) {
+    mime = 'video/mp4;codecs="avc1.42E01E"';
+  } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+    mime = 'video/mp4';
+  } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+    mime = 'video/webm;codecs=vp9';
+  } else {
+    mime = 'video/webm;codecs=vp8';
+  }
+  const stream = cvs.captureStream(FPS);
+  const mr = new MediaRecorder(stream, {
+    mimeType: mime,
+    videoBitsPerSecond: 1_000_000 // 1Mbps（十分軽量）
+  });
+  const chunks = [];
+  mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  mr.onstop = () => {
+    const blob = new Blob(chunks, { type: mime });
+    const url = URL.createObjectURL(blob);
+    dlLink.href = url;
+    dlLink.download = mime.includes('mp4') ? 'quick.mp4' : 'quick.webm';
+    dlLink.style.display = '';
+    dlLink.click();
+    setTimeout(()=> URL.revokeObjectURL(url), 10000);
+    progress(1);
+    status(`完了：${used.length}フレーム / ${FPS}fps / ${DURATION_S}s（形式：${mime}）`);
+  };
+  mr.start();
+
+  // —— 実時間で描画（= 録画所要 ≒ 目標尺）
+  const frameDelay = 1000 / FPS; // ms
+  const startT = performance.now();
+  for (let i = 0; i < used.length; i++) {
+    const f = used[i];
+    const bmp = await loadBitmapOrImage(f, { targetW: baseW, targetH: baseH });
+    // 背景塗り（レターボックス色）
+    ctx.fillStyle = BG; ctx.fillRect(0, 0, baseW, baseH);
+
+    // contain でフィット
+    let iw = bmp.width || bmp.naturalWidth, ih = bmp.height || bmp.naturalHeight;
+    const scale = Math.min(baseW/iw, baseH/ih);
+    const w = Math.round(iw*scale), h = Math.round(ih*scale);
+    const x = (baseW - w) >> 1, y = (baseH - h) >> 1;
+    ctx.imageSmoothingEnabled = false; // 高速化（低画質でOK）
+    ctx.drawImage(bmp, x, y, w, h);
+    bmp.close?.();
+
+    // 進捗
+    progress((i+1)/used.length);
+    status(`描画中… ${i+1}/${used.length}`);
+
+    // 実時間ウェイト（録画はリアルタイム）
+    await sleep(frameDelay);
+  }
+
+  // 最後のフレームを少し保持（プレイヤー互換性向上）
+  await sleep(200);
+  mr.stop();
+  status('エンコード完了処理中…');
+});
+
+function loadBitmapOrImage(file, opt={}){
+  const url = URL.createObjectURL(file);
+  return new Promise(async (resolve, reject)=>{
+    try{
+      if('createImageBitmap' in window){
+        const bmp = await createImageBitmap(file, {
+          resizeWidth:  opt.targetW || undefined,
+          resizeHeight: opt.targetH || undefined,
+          resizeQuality: 'low' // 速度優先
+        });
+        URL.revokeObjectURL(url);
+        resolve(bmp);
+        return;
+      }
+    }catch(e){ /* フォールバックへ */ }
+    const img = new Image();
+    img.onload = ()=>{ URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = (e)=>{ URL.revokeObjectURL(url); reject(e); };
+    img.src = url;
+  });
+}
+
+/* ユーティリティ */
+function status(t){ statusEl.textContent = t; }
+function resetProgress(){ fill.style.width='0%'; pct.textContent='0%'; }
+function progress(p){ const v=Math.max(0,Math.min(1,p)); fill.style.width=(v*100).toFixed(0)+'%'; pct.textContent=(v*100).toFixed(0)+'%'; }
+function sleep(ms){ return new Promise(r=> setTimeout(r, ms)); }
+function clampInt(v,min,max){ const n=parseInt(v,10); if(!Number.isFinite(n)) return null; return Math.max(min, Math.min(max, n)); }
+</script>
+</body>
+</html>
