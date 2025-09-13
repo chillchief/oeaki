@@ -19,15 +19,18 @@
   #fill { height:100%; width:0%; background:#3b82f6; }
   #status { min-height:1.4em; }
   .hint { font-size:12px; opacity:.75; }
+  /* 追加：リンクボタン */
+  a.btn { display:inline-block; padding:8px 12px; border-radius:8px; border:1px solid #9995; background:#fff; color:#111; text-decoration:none; }
+  a.btn:hover { filter: brightness(0.98); }
 </style>
 </head>
 <body>
   <h1>画像→MP4（高速5秒モード）</h1>
+  <!-- 追加：おえかきページへ戻る -->
+  <p><a class="btn" href="oeaki30.html">おえかきページへ戻る</a></p>
 
   <div class="row">
-    <!-- PC向け：フォルダ選択（iOS Safariは非対応） -->
     <input id="dir" type="file" webkitdirectory directory multiple />
-    <!-- 代替：複数ファイル選択（iPad等はこちら） -->
     <input id="files" type="file" accept="image/*" multiple />
     <button id="preset" type="button">5秒プリセット</button>
   </div>
@@ -93,7 +96,6 @@ filesInput.addEventListener('change', handlePick);
 function handlePick(e){
   const fs = Array.from(e.target.files || []);
   pickedFiles = fs.filter(f => f.type.startsWith('image/') && !/heic|heif/i.test(f.name));
-  // 相対パス→自然順でソート
   pickedFiles.sort((a,b)=>{
     const pa = a.webkitRelativePath || a.name;
     const pb = b.webkitRelativePath || b.name;
@@ -111,51 +113,38 @@ function handlePick(e){
 startBtn.addEventListener('click', async ()=>{
   if(!pickedFiles.length) return;
 
-  // —— 設定値取得
-  const DURATION_S = clampInt(durationEl.value, 1, 300) || 5;     // 目標尺（秒）
-  const MAX_FPS    = clampInt(fpsEl.value, 1, 60) || 15;          // 上限FPS
-  const EDGE       = clampInt(edgeEl.value, 80, 4000) || 320;     // 長辺
+  const DURATION_S = clampInt(durationEl.value, 1, 300) || 5;
+  const MAX_FPS    = clampInt(fpsEl.value, 1, 60) || 15;
+  const EDGE       = clampInt(edgeEl.value, 80, 4000) || 320;
   const BG         = bgEl.value || '#fff';
 
-  // —— フレーム選抜（均等間引き）→ 目標総フレーム数 = DURATION_S * MAX_FPS
   const targetFrames = Math.max(1, DURATION_S * MAX_FPS);
   const total = pickedFiles.length;
   const step  = Math.max(1, Math.ceil(total / targetFrames));
   const used  = [];
   for(let i=0;i<total;i+=step) used.push(pickedFiles[i]);
-  const FPS = Math.min(MAX_FPS, Math.ceil(used.length / DURATION_S)); // 実際のFPS（均等化）
+  const FPS = Math.min(MAX_FPS, Math.ceil(used.length / DURATION_S));
 
   status(`準備中… 使用 ${used.length}/${total} 枚、FPS=${FPS}、目標 ${DURATION_S}s`);
   resetProgress(); progress(0);
 
-  // —— 1枚目から出力サイズ決定
   const first = await loadBitmapOrImage(used[0]);
   const w0 = first.width || first.naturalWidth, h0 = first.height || first.naturalHeight;
   const s0 = Math.min(1, EDGE / Math.max(w0, h0));
   const baseW = Math.max(1, Math.round(w0 * s0));
   const baseH = Math.max(1, Math.round(h0 * s0));
-  // 描画用Canvas
   const cvs = document.createElement('canvas');
   cvs.width = baseW; cvs.height = baseH;
   const ctx = cvs.getContext('2d');
 
-  // —— 録画トラック準備（MP4優先／フォールバックあり）
-  // Safariなど：video/mp4（H.264）／Chrome等：video/webm（VP8/9）
   let mime = '';
-  if (MediaRecorder.isTypeSupported('video/mp4;codecs="avc1.42E01E"')) {
-    mime = 'video/mp4;codecs="avc1.42E01E"';
-  } else if (MediaRecorder.isTypeSupported('video/mp4')) {
-    mime = 'video/mp4';
-  } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
-    mime = 'video/webm;codecs=vp9';
-  } else {
-    mime = 'video/webm;codecs=vp8';
-  }
+  if (MediaRecorder.isTypeSupported('video/mp4;codecs="avc1.42E01E"')) mime = 'video/mp4;codecs="avc1.42E01E"';
+  else if (MediaRecorder.isTypeSupported('video/mp4')) mime = 'video/mp4';
+  else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) mime = 'video/webm;codecs=vp9';
+  else mime = 'video/webm;codecs=vp8';
+
   const stream = cvs.captureStream(FPS);
-  const mr = new MediaRecorder(stream, {
-    mimeType: mime,
-    videoBitsPerSecond: 1_000_000 // 1Mbps（十分軽量）
-  });
+  const mr = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 1_000_000 });
   const chunks = [];
   mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
   mr.onstop = () => {
@@ -171,53 +160,41 @@ startBtn.addEventListener('click', async ()=>{
   };
   mr.start();
 
-  // —— 実時間で描画（= 録画所要 ≒ 目標尺）
-  const frameDelay = 1000 / FPS; // ms
-  const startT = performance.now();
+  const frameDelay = 1000 / FPS;
   for (let i = 0; i < used.length; i++) {
     const f = used[i];
     const bmp = await loadBitmapOrImage(f, { targetW: baseW, targetH: baseH });
-    // 背景塗り（レターボックス色）
     ctx.fillStyle = BG; ctx.fillRect(0, 0, baseW, baseH);
-
-    // contain でフィット
     let iw = bmp.width || bmp.naturalWidth, ih = bmp.height || bmp.naturalHeight;
     const scale = Math.min(baseW/iw, baseH/ih);
     const w = Math.round(iw*scale), h = Math.round(ih*scale);
     const x = (baseW - w) >> 1, y = (baseH - h) >> 1;
-    ctx.imageSmoothingEnabled = false; // 高速化（低画質でOK）
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(bmp, x, y, w, h);
     bmp.close?.();
 
-    // 進捗
     progress((i+1)/used.length);
     status(`描画中… ${i+1}/${used.length}`);
-
-    // 実時間ウェイト（録画はリアルタイム）
     await sleep(frameDelay);
   }
-
-  // 最後のフレームを少し保持（プレイヤー互換性向上）
   await sleep(200);
   mr.stop();
   status('エンコード完了処理中…');
 });
 
 function loadBitmapOrImage(file, opt={}){
-  const url = URL.createObjectURL(file);
   return new Promise(async (resolve, reject)=>{
     try{
       if('createImageBitmap' in window){
         const bmp = await createImageBitmap(file, {
           resizeWidth:  opt.targetW || undefined,
           resizeHeight: opt.targetH || undefined,
-          resizeQuality: 'low' // 速度優先
+          resizeQuality: 'low'
         });
-        URL.revokeObjectURL(url);
-        resolve(bmp);
-        return;
+        resolve(bmp); return;
       }
-    }catch(e){ /* フォールバックへ */ }
+    }catch(e){}
+    const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = ()=>{ URL.revokeObjectURL(url); resolve(img); };
     img.onerror = (e)=>{ URL.revokeObjectURL(url); reject(e); };
