@@ -137,4 +137,92 @@ startBtn.addEventListener('click', async ()=>{
       width: baseW,
       height: baseH
     });
-    gif.on('progress', p => progress
+    gif.on('progress', p => progress(p));
+    gif.on('finished', (blob)=>{
+      const url = URL.createObjectURL(blob);
+      dlLink.href = url;
+      dlLink.style.display = '';
+      dlLink.click();
+      setTimeout(()=>URL.revokeObjectURL(url), 10000);
+      progress(1);
+      status(`完了：${used.length} フレーム / ${DELAY_MS}ms`);
+      lock(false);
+    });
+
+    // 逐次読み込み→縮小→フレーム追加（同時に大量読み込みしない＝安定）
+    for(let i=0;i<used.length;i++){
+      const f = used[i];
+      try{
+        // 低品質で事前縮小（対応ブラウザは createImageBitmap を使う）
+        const bmpOrImg = await loadBitmapOrImage(f, { targetW: baseW, targetH: baseH });
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,baseW,baseH);
+
+        if(isBitmap(bmpOrImg)){
+          ctx.drawImage(bmpOrImg, 0, 0, baseW, baseH);
+          bmpOrImg.close?.();
+        }else{
+          // 画像をフィット（黒帯なし）— 速さ優先で近似
+          const iw = bmpOrImg.naturalWidth, ih = bmpOrImg.naturalHeight;
+          const scale = Math.min(baseW/iw, baseH/ih);
+          const w = Math.round(iw*scale), h = Math.round(ih*scale);
+          const x = (baseW - w) >> 1, y = (baseH - h) >> 1;
+          ctx.imageSmoothingEnabled = false; // さらに速く
+          ctx.drawImage(bmpOrImg, x, y, w, h);
+        }
+
+        gif.addFrame(cvs, { copy:true, delay: DELAY_MS });
+        status(`フレーム追加中… ${i+1}/${used.length}`);
+        await microtask(); // UI更新
+      }catch(err){
+        console.warn('frame skip:', f.name, err);
+        status(`フレーム処理失敗をスキップ: ${f.name}`);
+      }
+    }
+
+    if(!gif.frames || gif.frames.length===0){
+      throw new Error('有効なフレームがありません（対応外形式や読み込み失敗）');
+    }
+    status('エンコード中…');
+    gif.render();
+  }catch(err){
+    console.error(err);
+    status('エラーが発生しました。画像形式・枚数・サイズを見直してください。');
+    lock(false);
+  }
+});
+
+function isBitmap(obj){ return obj && typeof obj.close === 'function' && 'width' in obj && 'height' in obj; }
+
+function loadBitmapOrImage(file, opt={}){
+  // 可能なら createImageBitmap で直接縮小（低品質）
+  const url = URL.createObjectURL(file);
+  return new Promise(async (resolve, reject)=>{
+    try{
+      if('createImageBitmap' in window){
+        const bmp = await createImageBitmap(await fetch(url).then(r=>r.blob()), {
+          resizeWidth:  opt.targetW || undefined,
+          resizeHeight: opt.targetH || undefined,
+          resizeQuality: 'low' // 速度優先
+        });
+        URL.revokeObjectURL(url);
+        resolve(bmp);
+        return;
+      }
+    }catch(e){ /* フォールバックへ */ }
+    const img = new Image();
+    img.onload = ()=>{ URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = (e)=>{ URL.revokeObjectURL(url); reject(e); };
+    img.src = url;
+  });
+}
+
+/* UIユーティリティ */
+function status(t){ statusEl.textContent = t; }
+function resetProgress(){ fill.style.width='0%'; pct.textContent='0%'; }
+function progress(p){ const v=Math.max(0,Math.min(1,p)); fill.style.width=(v*100).toFixed(0)+'%'; pct.textContent=(v*100).toFixed(0)+'%'; }
+function lock(busy){ startBtn.disabled = busy || !pickedFiles.length; dirInput.disabled = busy; filesInput.disabled = busy; }
+function microtask(){ return new Promise(r => setTimeout(r, 0)); }
+function clampInt(v, min,max){ const n=parseInt(v,10); if(!Number.isFinite(n)) return null; return Math.max(min, Math.min(max, n)); }
+</script>
+</body>
+</html>
