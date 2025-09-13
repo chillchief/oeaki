@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>おえかき30ページ → プレビュー & GIF</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP"; background:#f6f7f9; }
+  header { background:#1f2937; color:#fff; padding:10px 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header .title { font-weight:600; margin-right:8px; }
+  button, .pagebtn { padding:6px 10px; border-radius:8px; border:1px solid #64748b40; background:#fff; cursor:pointer; }
+  button.primary { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+  button:disabled { opacity:.6; cursor:not-allowed; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  main { display:grid; grid-template-columns: 1fr; gap:10px; padding:10px; }
+  .canvas-wrap { display:flex; justify-content:center; }
+  canvas { background:#fff; border:1px solid #e5e7eb; border-radius:8px; touch-action:none; }
+  /* ページボタンは横スクロール（30個でも見やすく） */
+  .pages { display:flex; gap:6px; padding:6px 10px 10px; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; }
+  .pagebtn { min-width:40px; text-align:center; background:#fff; }
+  .pagebtn.active { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+  #bar { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; width:320px; }
+  #fill { height:100%; width:0%; background:#3b82f6; }
+  #status { min-height:1.2em; font-size:13px; color:#374151; text-align:center; }
+  #err { color:#b91c1c; font-size:12px; white-space:pre-wrap; text-align:center; }
+  .spacer { flex:1; }
+  .field { color:#e5e7eb; font-size:13px; }
+  .field input { width:6em; padding:4px 6px; border-radius:6px; border:1px solid #64748b40; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/gif.js.optimized/dist/gif.js"></script>
+</head>
+<body>
+<header>
+  <div class="title">おえかき 30ページ → プレビュー & GIF</div>
+  <div class="row">
+    <button id="penBtn" class="primary">ペン</button>
+    <button id="eraserBtn">消しゴム</button>
+    <button id="undoBtn">戻る</button>
+    <button id="clearBtn">全消去</button>
+    <button id="saveBtn">このページをPNG保存</button>
+  </div>
+  <div class="spacer"></div>
+
+  <div class="row">
+    <span class="field">遅延(ms)：<input id="delayMs" type="number" min="10" step="10" value="100"></span>
+    <button id="playBtn">▶︎ プレビュー</button>
+    <button id="gifBtn" class="primary">GIF作成</button>
+  </div>
+
+  <div class="row" style="margin-left:auto">
+    <button id="prevBtn">← 前</button>
+    <div id="pageLabel">ページ 1 / 30</div>
+    <button id="nextBtn">次 →</button>
+  </div>
+</header>
+
+<div class="pages" id="pages"></div>
+
+<main>
+  <div class="canvas-wrap">
+    <!-- 編集用キャンバス（内部解像度は固定640×480） -->
+    <canvas id="canvas" width="640" height="480"></canvas>
+  </div>
+  <div class="row" style="justify-content:center; gap:12px;">
+    <div id="bar"><div id="fill"></div></div>
+    <div id="pct" style="width:60px; text-align:right;">0%</div>
+  </div>
+  <div id="status"></div>
+  <div id="err"></div>
+</main>
+
+<script>
+/* ========= 定数・状態 ========= */
+const CANVAS_W = 640, CANVAS_H = 480; // 編集用サイズ（固定）
+const GIF_EDGE  = 320;                 // 出力GIFの長辺（小さめ固定）
+const PAGE_COUNT = 30;                 // ★ 30ページに増加 ★
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const pagesBar = document.getElementById('pages');
+const pageLabel = document.getElementById('pageLabel');
+const statusEl = document.getElementById('status');
+const errEl = document.getElementById('err');
+const fill = document.getElementById('fill');
+const pct = document.getElementById('pct');
+const delayInput = document.getElementById('delayMs');
+
+let drawing=false, erasing=false, last=null;
+let currentPage = 0;
+const undoStack = [];
+const UNDO_LIMIT = 50;
+
+// 各ページの内容（ImageData）と描いたかどうかのフラグ
+const pages = Array.from({length: PAGE_COUNT}, () => ({ data: null, dirty: false }));
+
+// プレビュー管理
+let isPreview = false;
+let previewTimer = null;
+let previewFrames = [];
+let previewIndex = 0;
+let previewBackup = { pageIndex: 0, image: null };
+
+/* ========= 初期化 ========= */
+initCanvas();
+buildPageButtons();
+loadPage(0);
+bindUI();
+updatePageUI(); // 初期表示を現在の設定で上書き（/30 を反映）
+
+function initCanvas(){
+  // 背景を白で初期化
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+}
+
+function buildPageButtons(){
+  for(let i=0;i<PAGE_COUNT;i++){
+    const b = document.createElement('button');
+    b.className = 'pagebtn' + (i===0 ? ' active' : '');
+    b.textContent = (i+1);
+    b.addEventListener('click', ()=> switchPage(i));
+    pagesBar.appendChild(b);
+  }
+}
+
+function bindUI(){
+  document.getElementById('penBtn').onclick    = ()=>{ erasing=false; setActive('penBtn'); };
+  document.getElementById('eraserBtn').onclick = ()=>{ erasing=true;  setActive('eraserBtn'); };
+  document.getElementById('undoBtn').onclick   = ()=>{ if(!isPreview) undo(); };
+  document.getElementById('clearBtn').onclick  = ()=>{ if(!isPreview){ pushSnapshot(); clearCanvas(); pages[currentPage].dirty=true; } };
+  document.getElementById('saveBtn').onclick   = ()=>{ if(!isPreview) saveCurrentPNG(); };
+  document.getElementById('prevBtn').onclick   = ()=>{ if(!isPreview) switchPage(Math.max(0, currentPage-1)); };
+  document.getElementById('nextBtn').onclick   = ()=>{ if(!isPreview) switchPage(Math.min(PAGE_COUNT-1, currentPage+1)); };
+  document.getElementById('gifBtn').onclick    = exportGIF;
+
+  const playBtn = document.getElementById('playBtn');
+  playBtn.onclick = ()=> isPreview ? stopPreview() : startPreview();
+
+  // 描画（Pointer: マウス/タッチ/Apple Pencil共通）
+  canvas.addEventListener('pointerdown', (e)=>{
+    if(isPreview) return; // プレビュー中は編集禁止
+    e.preventDefault();
+    canvas.setPointerCapture(e.pointerId);
+    drawing = true;
+    last = getPos(e);
+    pushSnapshot(); // ストローク開始前に履歴を積む
+  });
+  canvas.addEventListener('pointermove', (e)=>{
+    if(!drawing || isPreview) return;
+    const p = getPos(e);
+    ctx.strokeStyle = erasing ? '#fff' : '#000';
+    ctx.lineWidth = erasing ? 18 : 4;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(last.x,last.y); ctx.lineTo(p.x,p.y); ctx.stroke();
+    last = p;
+    pages[currentPage].dirty = true;
+  });
+  ['pointerup','pointercancel','pointerleave'].forEach(ev => canvas.addEventListener(ev, ()=>{ drawing=false; last=null; }));
+
+  // ショートカット（戻る）
+  window.addEventListener('keydown', (e)=>{
+    const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase()==='z';
+    if(isUndo && !isPreview){ e.preventDefault(); undo(); }
+  });
+}
+
+function setActive(id){
+  ['penBtn','eraserBtn'].forEach(x=>document.getElementById(x).classList.remove('primary'));
+  document.getElementById(id).classList.add('primary');
+}
+
+function getPos(e){
+  const r = canvas.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+/* ========= ページ切替 ========= */
+function switchPage(i){
+  if(i===currentPage) return;
+  savePage(currentPage);
+  loadPage(i);
+  currentPage = i;
+  updatePageUI();
+}
+function updatePageUI(){
+  pageLabel.textContent = `ページ ${currentPage+1} / ${PAGE_COUNT}`;
+  Array.from(pagesBar.children).forEach((b,idx)=> b.classList.toggle('active', idx===currentPage));
+  undoStack.length = 0; // ページ切替でUndo履歴はクリア
+}
+function savePage(i){
+  try{ pages[i].data = ctx.getImageData(0,0,canvas.width,canvas.height); }catch(e){ console.warn('savePage失敗', e); }
+}
+function loadPage(i){
+  clearCanvas();
+  if(pages[i].data){
+    try{ ctx.putImageData(pages[i].data, 0, 0); }catch(e){ console.warn('loadPage失敗', e); }
+  }
+}
+function clearCanvas(){
+  ctx.save(); ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore();
+}
+
+/* ========= Undo ========= */
+function pushSnapshot(){
+  try{
+    const snap = ctx.getImageData(0,0,canvas.width,canvas.height);
+    if(undoStack.length>=UNDO_LIMIT) undoStack.shift();
+    undoStack.push(snap);
+  }catch(e){ console.warn('snapshot失敗', e); }
+}
+function undo(){
+  if(!undoStack.length) return;
+  const prev = undoStack.pop();
+  try{ ctx.putImageData(prev,0,0); }catch(e){ console.warn('undo失敗', e); }
+}
+
+/* ========= PNG保存（現在の1ページ） ========= */
+function saveCurrentPNG(){
+  const a = document.createElement('a');
+  a.download = `page-${String(currentPage+1).padStart(2,'0')}.png`;
+  a.href = canvas.toDataURL('image/png');
+  a.click();
+}
+
+/* ========= プレビュー ========= */
+function startPreview(){
+  savePage(currentPage);
+  // 空ページはスキップ
+  previewFrames = [];
+  for(let i=0;i<PAGE_COUNT;i++){
+    if(pages[i].dirty && pages[i].data) previewFrames.push(i);
+  }
+  if(previewFrames.length===0){
+    status('描画のあるページがありません（プレビューできません）'); return;
+  }
+
+  // バックアップ
+  try{ previewBackup.image = ctx.getImageData(0,0,canvas.width,canvas.height); }catch{}
+  previewBackup.pageIndex = currentPage;
+
+  setEditingEnabled(false);
+  isPreview = true;
+  previewIndex = 0;
+  document.getElementById('playBtn').textContent = '■ 停止';
+  status('プレビュー再生中…');
+
+  const delay = getDelay();
+  renderPreviewFrame();
+  previewTimer = setInterval(renderPreviewFrame, delay);
+}
+function renderPreviewFrame(){
+  const idx = previewFrames[previewIndex];
+  Array.from(pagesBar.children).forEach((b, i)=> b.classList.toggle('active', i===idx));
+  pageLabel.textContent = `ページ ${idx+1} / ${PAGE_COUNT}`;
+
+  clearCanvas();
+  try{ ctx.putImageData(pages[idx].data, 0, 0); }catch(e){ console.warn('preview復元失敗', e); }
+
+  previewIndex = (previewIndex + 1) % previewFrames.length;
+}
+function stopPreview(){
+  if(!isPreview) return;
+  clearInterval(previewTimer);
+  previewTimer = null;
+  isPreview = false;
+  document.getElementById('playBtn').textContent = '▶︎ プレビュー';
+
+  // 復元
+  try{ if(previewBackup.image) ctx.putImageData(previewBackup.image, 0, 0); }catch{}
+  switchPage(previewBackup.pageIndex);
+  setEditingEnabled(true);
+  status('プレビュー停止');
+}
+function setEditingEnabled(enabled){
+  ['penBtn','eraserBtn','undoBtn','clearBtn','saveBtn','prevBtn','nextBtn','gifBtn']
+    .forEach(id => document.getElementById(id).disabled = !enabled);
+  delayInput.disabled = !enabled;
+}
+
+/* ========= GIF作成 ========= */
+async function exportGIF(){
+  if(isPreview) return;
+  resetProgress(); clearError();
+  status('GIFを準備中…');
+
+  savePage(currentPage);
+
+  const targets = [];
+  for(let i=0;i<PAGE_COUNT;i++){
+    if(pages[i].dirty && pages[i].data) targets.push(i);
+  }
+  if(targets.length===0){ status('描画のあるページがありません。'); return; }
+
+  // 出力サイズ（長辺=GIF_EDGE）
+  const s = Math.min(1, GIF_EDGE / Math.max(CANVAS_W, CANVAS_H));
+  const outW = Math.max(1, Math.round(CANVAS_W * s));
+  const outH = Math.max(1, Math.round(CANVAS_H * s));
+  const out = document.createElement('canvas');
+  const octx = out.getContext('2d');
+  out.width = outW; out.height = outH;
+
+  // iOS/Safari はワーカー1で安定
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua);
+  const cores = isIOS ? 1 : Math.min(Math.max((navigator.hardwareConcurrency||2),2),8);
+
+  const gif = new GIF({
+    workers: cores,
+    quality: 20,
+    dither: false,
+    workerScript: 'https://cdn.jsdelivr.net/npm/gif.js.optimized/dist/gif.worker.js',
+    width: outW, height: outH
+  });
+
+  gif.on('progress', p => progress(p));
+  gif.on('finished', (blob)=>{
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'animation.gif';
+    a.click();
+    setTimeout(()=> URL.revokeObjectURL(url), 10000);
+    progress(1); status(`完成：${targets.length}フレーム / ${getDelay()}ms`);
+  });
+
+  for(const idx of targets){
+    try{
+      // 編集サイズ→出力サイズへ縮小転写
+      const tmp = document.createElement('canvas');
+      tmp.width = CANVAS_W; tmp.height = CANVAS_H;
+      const tctx = tmp.getContext('2d');
+      tctx.putImageData(pages[idx].data, 0, 0);
+
+      octx.fillStyle = '#ffffff';
+      octx.fillRect(0,0,outW,outH);
+      octx.imageSmoothingEnabled = true;
+      octx.imageSmoothingQuality = 'high';
+      octx.drawImage(tmp, 0, 0, outW, outH);
+
+      gif.addFrame(out, { copy:true, delay: getDelay() });
+      status(`フレーム追加中… ページ${idx+1}`);
+      await microtask();
+    }catch(e){
+      logError(`ページ${idx+1}のフレーム追加に失敗：${e?.message||e}`);
+    }
+  }
+
+  if(!gif.frames || gif.frames.length===0){ status('エラー：有効なフレームがありません。'); return; }
+  status('エンコード中…');
+  gif.render();
+}
+
+/* ========= 進捗＆メッセージ ========= */
+function resetProgress(){ fill.style.width='0%'; pct.textContent='0%'; }
+function progress(p){ const v=Math.max(0,Math.min(1,p)); fill.style.width=(v*100).toFixed(0)+'%'; pct.textContent=(v*100).toFixed(0)+'%'; }
+function status(t){ statusEl.textContent = t; }
+function clearError(){ errEl.textContent=''; }
+function logError(t){ errEl.textContent += (t+'\n'); }
+function microtask(){ return new Promise(r=>setTimeout(r,0)); }
+function getDelay(){ const n = parseInt(delayInput.value, 10); return Number.isFinite(n) ? Math.max(10, n) : 100; }
+</script>
+</body>
+</html>
