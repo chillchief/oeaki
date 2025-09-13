@@ -3,16 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>おえかき10ページ → GIF</title>
+<title>おえかき10ページ → プレビュー & GIF</title>
 <style>
   :root { color-scheme: light dark; }
   body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP"; background:#f6f7f9; }
   header { background:#1f2937; color:#fff; padding:10px 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   header .title { font-weight:600; margin-right:8px; }
-  button, .pagebtn {
-    padding:6px 10px; border-radius:8px; border:1px solid #64748b40; background:#fff; cursor:pointer;
-  }
+  button, .pagebtn { padding:6px 10px; border-radius:8px; border:1px solid #64748b40; background:#fff; cursor:pointer; }
   button.primary { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+  button:disabled { opacity:.6; cursor:not-allowed; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   main { display:grid; grid-template-columns: 1fr; gap:10px; padding:10px; }
   .canvas-wrap { display:flex; justify-content:center; }
@@ -22,15 +21,17 @@
   .pagebtn.active { background:#3b82f6; color:#fff; border-color:#3b82f6; }
   #bar { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; width:320px; }
   #fill { height:100%; width:0%; background:#3b82f6; }
-  #status { min-height:1.2em; font-size:13px; color:#374151; }
-  #err { color:#b91c1c; font-size:12px; white-space:pre-wrap; }
+  #status { min-height:1.2em; font-size:13px; color:#374151; text-align:center; }
+  #err { color:#b91c1c; font-size:12px; white-space:pre-wrap; text-align:center; }
+  .spacer { flex:1; }
+  .field { color:#e5e7eb; font-size:13px; }
+  .field input { width:6em; padding:4px 6px; border-radius:6px; border:1px solid #64748b40; }
 </style>
-<!-- GIFエンコーダ（CDN） -->
 <script src="https://cdn.jsdelivr.net/npm/gif.js.optimized/dist/gif.js"></script>
 </head>
 <body>
 <header>
-  <div class="title">おえかき 10ページ → GIF</div>
+  <div class="title">おえかき 10ページ → プレビュー & GIF</div>
   <div class="row">
     <button id="penBtn" class="primary">ペン</button>
     <button id="eraserBtn">消しゴム</button>
@@ -38,12 +39,18 @@
     <button id="clearBtn">全消去</button>
     <button id="saveBtn">このページをPNG保存</button>
   </div>
-  <div style="flex:1"></div>
+  <div class="spacer"></div>
+
   <div class="row">
+    <span class="field">遅延(ms)：<input id="delayMs" type="number" min="10" step="10" value="100"></span>
+    <button id="playBtn">▶︎ プレビュー</button>
+    <button id="gifBtn" class="primary">GIF作成</button>
+  </div>
+
+  <div class="row" style="margin-left:auto">
     <button id="prevBtn">← 前</button>
     <div id="pageLabel">ページ 1 / 10</div>
     <button id="nextBtn">次 →</button>
-    <button id="gifBtn" class="primary">GIF作成</button>
   </div>
 </header>
 
@@ -58,15 +65,14 @@
     <div id="bar"><div id="fill"></div></div>
     <div id="pct" style="width:60px; text-align:right;">0%</div>
   </div>
-  <div id="status" style="text-align:center;"></div>
-  <div id="err" style="text-align:center;"></div>
+  <div id="status"></div>
+  <div id="err"></div>
 </main>
 
 <script>
 /* ========= 定数・状態 ========= */
 const CANVAS_W = 640, CANVAS_H = 480; // 編集用サイズ（固定）
-const GIF_EDGE  = 320;   // 出力GIFの長辺（小さめ固定）
-const DELAY_MS  = 100;   // 各フレームの遅延（100ms=約10fps）
+const GIF_EDGE  = 320;                 // 出力GIFの長辺（小さめ固定）
 const PAGE_COUNT = 10;
 
 const canvas = document.getElementById('canvas');
@@ -77,6 +83,7 @@ const statusEl = document.getElementById('status');
 const errEl = document.getElementById('err');
 const fill = document.getElementById('fill');
 const pct = document.getElementById('pct');
+const delayInput = document.getElementById('delayMs');
 
 let drawing=false, erasing=false, last=null;
 let currentPage = 0;
@@ -85,6 +92,13 @@ const UNDO_LIMIT = 50;
 
 // 各ページの内容（ImageData）と描いたかどうかのフラグ
 const pages = Array.from({length: PAGE_COUNT}, () => ({ data: null, dirty: false }));
+
+// プレビュー管理
+let isPreview = false;
+let previewTimer = null;
+let previewFrames = [];
+let previewIndex = 0;
+let previewBackup = { pageIndex: 0, image: null };
 
 /* ========= 初期化 ========= */
 initCanvas();
@@ -111,15 +125,19 @@ function buildPageButtons(){
 function bindUI(){
   document.getElementById('penBtn').onclick    = ()=>{ erasing=false; setActive('penBtn'); };
   document.getElementById('eraserBtn').onclick = ()=>{ erasing=true;  setActive('eraserBtn'); };
-  document.getElementById('undoBtn').onclick   = undo;
-  document.getElementById('clearBtn').onclick  = ()=>{ pushSnapshot(); clearCanvas(); };
-  document.getElementById('saveBtn').onclick   = saveCurrentPNG;
-  document.getElementById('prevBtn').onclick   = ()=> switchPage(Math.max(0, currentPage-1));
-  document.getElementById('nextBtn').onclick   = ()=> switchPage(Math.min(PAGE_COUNT-1, currentPage+1));
+  document.getElementById('undoBtn').onclick   = ()=>{ if(!isPreview) undo(); };
+  document.getElementById('clearBtn').onclick  = ()=>{ if(!isPreview){ pushSnapshot(); clearCanvas(); pages[currentPage].dirty=true; } };
+  document.getElementById('saveBtn').onclick   = ()=>{ if(!isPreview) saveCurrentPNG(); };
+  document.getElementById('prevBtn').onclick   = ()=>{ if(!isPreview) switchPage(Math.max(0, currentPage-1)); };
+  document.getElementById('nextBtn').onclick   = ()=>{ if(!isPreview) switchPage(Math.min(PAGE_COUNT-1, currentPage+1)); };
   document.getElementById('gifBtn').onclick    = exportGIF;
+
+  const playBtn = document.getElementById('playBtn');
+  playBtn.onclick = ()=> isPreview ? stopPreview() : startPreview();
 
   // 描画（Pointer: マウス/タッチ/Apple Pencil共通）
   canvas.addEventListener('pointerdown', (e)=>{
+    if(isPreview) return; // プレビュー中は編集禁止
     e.preventDefault();
     canvas.setPointerCapture(e.pointerId);
     drawing = true;
@@ -127,7 +145,7 @@ function bindUI(){
     pushSnapshot(); // ストローク開始前に履歴を積む
   });
   canvas.addEventListener('pointermove', (e)=>{
-    if(!drawing) return;
+    if(!drawing || isPreview) return;
     const p = getPos(e);
     ctx.strokeStyle = erasing ? '#fff' : '#000';
     ctx.lineWidth = erasing ? 18 : 4;
@@ -142,7 +160,7 @@ function bindUI(){
   // ショートカット（戻る）
   window.addEventListener('keydown', (e)=>{
     const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase()==='z';
-    if(isUndo){ e.preventDefault(); undo(); }
+    if(isUndo && !isPreview){ e.preventDefault(); undo(); }
   });
 }
 
@@ -167,14 +185,11 @@ function switchPage(i){
 function updatePageUI(){
   pageLabel.textContent = `ページ ${currentPage+1} / ${PAGE_COUNT}`;
   Array.from(pagesBar.children).forEach((b,idx)=> b.classList.toggle('active', idx===currentPage));
-  // ページ変更でUndo履歴はクリア（ページごとの履歴は保持しません）
-  undoStack.length = 0;
+  undoStack.length = 0; // ページ切替でUndo履歴はクリア
 }
 
 function savePage(i){
-  try{
-    pages[i].data = ctx.getImageData(0,0,canvas.width,canvas.height);
-  }catch(e){ console.warn('savePage失敗', e); }
+  try{ pages[i].data = ctx.getImageData(0,0,canvas.width,canvas.height); }catch(e){ console.warn('savePage失敗', e); }
 }
 function loadPage(i){
   clearCanvas();
@@ -202,15 +217,80 @@ function undo(){
 
 /* ========= PNG保存（現在の1ページ） ========= */
 function saveCurrentPNG(){
-  // 現在描画を安全に取得
   const a = document.createElement('a');
   a.download = `page-${String(currentPage+1).padStart(2,'0')}.png`;
   a.href = canvas.toDataURL('image/png');
   a.click();
 }
 
+/* ========= プレビュー ========= */
+function startPreview(){
+  // 現在ページの内容を保存
+  savePage(currentPage);
+
+  // プレビューフレーム（空ページはスキップ）
+  previewFrames = [];
+  for(let i=0;i<PAGE_COUNT;i++){
+    if(pages[i].dirty && pages[i].data) previewFrames.push(i);
+  }
+  if(previewFrames.length===0){
+    status('描画のあるページがありません（プレビューできません）'); return;
+  }
+
+  // バックアップ（停止時に完全復元）
+  try{ previewBackup.image = ctx.getImageData(0,0,canvas.width,canvas.height); }catch{}
+  previewBackup.pageIndex = currentPage;
+
+  // UIロック
+  setEditingEnabled(false);
+  isPreview = true;
+  previewIndex = 0;
+  document.getElementById('playBtn').textContent = '■ 停止';
+  status('プレビュー再生中…');
+
+  const delay = getDelay();
+  // 再生ループ
+  renderPreviewFrame(); // すぐ1枚描画
+  previewTimer = setInterval(renderPreviewFrame, delay);
+}
+function renderPreviewFrame(){
+  const idx = previewFrames[previewIndex];
+  // 表示ページのハイライト更新
+  Array.from(pagesBar.children).forEach((b, i)=> b.classList.toggle('active', i===idx));
+  pageLabel.textContent = `ページ ${idx+1} / ${PAGE_COUNT}`;
+
+  clearCanvas();
+  try{
+    // ImageDataをそのまま編集キャンバスに復元
+    ctx.putImageData(pages[idx].data, 0, 0);
+  }catch(e){
+    console.warn('preview復元失敗', e);
+  }
+
+  previewIndex = (previewIndex + 1) % previewFrames.length;
+}
+function stopPreview(){
+  if(!isPreview) return;
+  clearInterval(previewTimer);
+  previewTimer = null;
+  isPreview = false;
+  document.getElementById('playBtn').textContent = '▶︎ プレビュー';
+
+  // 復元
+  try{ if(previewBackup.image) ctx.putImageData(previewBackup.image, 0, 0); }catch{}
+  switchPage(previewBackup.pageIndex); // UI/ハイライトも戻す
+  setEditingEnabled(true);
+  status('プレビュー停止');
+}
+function setEditingEnabled(enabled){
+  ['penBtn','eraserBtn','undoBtn','clearBtn','saveBtn','prevBtn','nextBtn','gifBtn']
+    .forEach(id => document.getElementById(id).disabled = !enabled);
+  delayInput.disabled = !enabled;
+}
+
 /* ========= GIF作成 ========= */
 async function exportGIF(){
+  if(isPreview) return; // プレビュー中は不可
   resetProgress(); clearError();
   status('GIFを準備中…');
 
@@ -254,26 +334,25 @@ async function exportGIF(){
     a.href = url; a.download = 'animation.gif';
     a.click();
     setTimeout(()=> URL.revokeObjectURL(url), 10000);
-    progress(1); status(`完成：${targets.length}フレーム / ${DELAY_MS}ms`);
+    progress(1); status(`完成：${targets.length}フレーム / ${getDelay()}ms`);
   });
 
   // 各ページをフレーム化
   for(const idx of targets){
     try{
-      // ImageData → まず編集サイズで復元
+      // 編集サイズ→出力サイズへ縮小転写
       const tmp = document.createElement('canvas');
       tmp.width = CANVAS_W; tmp.height = CANVAS_H;
       const tctx = tmp.getContext('2d');
       tctx.putImageData(pages[idx].data, 0, 0);
 
-      // 出力サイズに高品質縮小
       octx.fillStyle = '#ffffff';
       octx.fillRect(0,0,outW,outH);
       octx.imageSmoothingEnabled = true;
       octx.imageSmoothingQuality = 'high';
       octx.drawImage(tmp, 0, 0, outW, outH);
 
-      gif.addFrame(out, { copy:true, delay: DELAY_MS });
+      gif.addFrame(out, { copy:true, delay: getDelay() });
       status(`フレーム追加中… ページ${idx+1}`);
       await microtask();
     }catch(e){
@@ -295,6 +374,10 @@ function status(t){ statusEl.textContent = t; }
 function clearError(){ errEl.textContent=''; }
 function logError(t){ errEl.textContent += (t+'\n'); }
 function microtask(){ return new Promise(r=>setTimeout(r,0)); }
+function getDelay(){
+  const n = parseInt(delayInput.value, 10);
+  return Number.isFinite(n) ? Math.max(10, n) : 100;
+}
 </script>
 </body>
 </html>
