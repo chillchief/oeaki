@@ -448,4 +448,19 @@ async function exportGIF(){
     }
   }
 
-  if(!gif.frames || gif.frames.length===0){ status('エラー
+  if(!gif.frames || gif.frames.length===0){ status('エラー：有効なフレームがありません。'); return; }
+  status('エンコード中…');
+  gif.render();
+}
+
+/* ========= 進捗＆メッセージ ========= */
+function resetProgress(){ fill.style.width='0%'; pct.textContent='0%'; }
+function progress(p){ const v=Math.max(0,Math.min(1,p)); fill.style.width=(v*100).toFixed(0)+'%'; pct.textContent=(v*100).toFixed(0)+'%'; }
+function status(t){ statusEl.textContent = t; }
+function clearError(){ errEl.textContent=''; }
+function logError(t){ errEl.textContent += (t+'\n'); }
+function microtask(){ return new Promise(r=>setTimeout(r,0)); }
+function getDelay(){ const n = parseInt(delayInput.value, 10); return Number.isFinite(n) ? Math.max(10, n) : 100; }
+</script>
+</body>
+</html>
