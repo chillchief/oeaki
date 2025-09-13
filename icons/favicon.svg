@@ -1,1 +1,8 @@
+<!-- icons/favicon.svg（仮アイコン。必要なら差し替えてください） -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="24" fill="#1f2937"/>
+  <path d="M96 40L52 84l-20 4 4-20 44-44 16 16zM44 68l16 16"
+        stroke="#fff" stroke-width="10" fill="none"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
 
